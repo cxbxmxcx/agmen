@@ -1,0 +1,61 @@
+# Builds the self-contained Windows release and publishes it.
+#   Push a tag like v0.2.0  -> a GitHub release with the zip, its checksum and install.ps1.
+#   Run manually            -> the zip is uploaded as a workflow artifact only.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Check the tag matches the version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $version = ([xml](Get-Content Agmen.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "The tag is $($env:GITHUB_REF_NAME), but Agmen.csproj says version $version. Update <Version>, or tag v$version."
+          }
+
+      - name: Build, check and zip
+        shell: pwsh
+        run: |
+          ./publish.ps1
+          $zip = Get-Item out/Agmen-win-x64.zip
+          "Built $($zip.Name): $([math]::Round($zip.Length / 1MB)) MB, SHA-256 $((Get-Content out/Agmen-win-x64.zip.sha256).Split(' ')[0])" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Agmen-win-x64
+          path: |
+            out/Agmen-win-x64.zip
+            out/Agmen-win-x64.zip.sha256
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @('out/Agmen-win-x64.zip', 'out/Agmen-win-x64.zip.sha256', 'install.ps1')
+          $notes = "docs/releases/$tag.md"
+          if (Test-Path $notes) {
+            gh release create $tag @assets --title "Agmen $tag" --notes-file $notes
+          } else {
+            gh release create $tag @assets --title "Agmen $tag" --generate-notes
+          }

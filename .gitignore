@@ -1,0 +1,12 @@
+bin/
+obj/
+*.user
+.vs/
+publish/
+out/
+artifacts/
+*.zip
+*.zip.sha256
+.idea/
+*.swp
+Thumbs.db

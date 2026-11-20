@@ -1,0 +1,15 @@
+<Window x:Class="Agmen.AgentSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Agent settings" Width="640" SizeToContent="Height" ResizeMode="NoResize" ShowInTaskbar="False"
+        Background="#FF101016" WindowStartupLocation="CenterOwner">
+
+    <StackPanel Margin="18,16,18,16">
+        <TextBlock Text="Agent settings" FontSize="16" FontWeight="SemiBold" Foreground="{StaticResource TextPrimary}"/>
+        <TextBlock Margin="0,6,0,14" FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"
+                   Text="How Agmen starts each agent's sessions, every time it starts, resumes or restarts one. &quot;Its own setting&quot; leaves the choice to the agent. A parent can still give a child its own model and effort, but never other permissions. Changes are saved as you make them."/>
+        <StackPanel x:Name="Cards"/>
+        <Button Content="Close" Style="{StaticResource ToolButton}" HorizontalAlignment="Right" Margin="0,4,0,0"
+                IsCancel="True" Click="OnClose"/>
+    </StackPanel>
+</Window>

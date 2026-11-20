@@ -1,0 +1,27 @@
+# Builds every push and pull request, so a change that doesn't compile is caught before it merges.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build
+        run: dotnet build Agmen.csproj -c Release
+
+      - name: Publish and check the release build
+        shell: pwsh
+        run: ./publish.ps1 -NoZip

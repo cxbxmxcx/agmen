@@ -1,0 +1,16 @@
+name: Feature request
+description: Something Agmen should do, or another agent CLI it should run
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The situation you're in, before any solution. An example from your own work helps most.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you picture it working. For another agent CLI, say how it resumes a session, takes MCP servers, and reports that a turn is over, if you know.

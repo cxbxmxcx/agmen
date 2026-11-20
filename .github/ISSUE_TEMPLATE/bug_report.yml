@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in Agmen doesn't work as the README says
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what Agmen did instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Which agent's sessions are affected
+      multiple: true
+      options:
+        - Claude Code
+        - Codex
+        - Kimi Code
+        - Antigravity
+        - None in particular
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Agmen's version, and the agent's, such as the output of `claude --version` or `codex --version`.
+      placeholder: Agmen 0.1.0, Claude Code 2.1.329
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: >
+        The lines of `%APPDATA%\Agmen\agmen.log` from around that time. Read them first: the log holds
+        folder paths, session names and your Windows user name. Remove anything you don't want public.
+      render: text

@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Agmen</AssemblyName>
+    <RootNamespace>Agmen</RootNamespace>
+    <Version>0.1.0</Version>
+    <!-- Program.Main decides between the tray app and the headless MCP server (dash-dash-mcp). -->
+    <StartupObject>Agmen.Program</StartupObject>
+    <SelfContained>false</SelfContained>
+    <!-- The hosted terminal control and ConPTY ship native x64 binaries. -->
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Keep the exe where the Startup shortcut already points. -->
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <!-- The UI is English-only; skip the framework's translated resources (13 folders) in builds and releases. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Product>Agmen</Product>
+    <Description>A Windows workspace that runs Claude Code, Codex, Kimi Code and Antigravity sessions as a tree of tabs.</Description>
+    <RepositoryUrl>https://github.com/cxbxmxcx/agmen</RepositoryUrl>
+    <!-- publish.ps1 builds into out\, inside this folder; keep its generated code out of the next build. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);out/**;publish/**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- Symbols travel inside Agmen.dll: the log gets line numbers, and no .pdb ships beside the exe. -->
+    <DebugType>embedded</DebugType>
+    <!-- Record source paths relative to the repository, not as they are on the build machine. -->
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WPF wrapper around the Windows Terminal control plus Microsoft's ConPTY package, MIT licensed. -->
+    <PackageReference Include="EasyWindowsTerminalControl" Version="1.0.38" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The ConPTY package's .NET targets point at a path that does not exist, so OpenConsole.exe never
+         reaches the output and conpty.dll silently falls back to the older inbox conhost, where Shift+Enter
+         sends the message instead of adding a line. Copy it to where conpty.dll looks, and keep it a file
+         of its own in a single-file publish: conpty.dll starts it by path. -->
+    <None Include="$(NuGetPackageRoot)microsoft.windows.console.conpty/1.24.260710001/build/native/runtimes/x64/OpenConsole.exe"
+          Link="x64/OpenConsole.exe" CopyToOutputDirectory="PreserveNewest" Visible="false"
+          ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+</Project>
