@@ -88,7 +88,7 @@ Agmen looks for each agent on your PATH. An agent it can't find shows as **(not 
 
 Tabs, the tree and the primary session work with any of the four, so one agent is enough. Only the floating session panel is limited to Claude Code sessions.
 
-Agmen was last run with Claude Code 2.1.329, Codex 0.167 and 0.171, Kimi Code 2.5 and Antigravity CLI 1.5, each of them as the primary and as a child. These CLIs change often. If one stops working in a tab after it updates, please [open an issue](https://github.com/cxbxmxcx/agmen/issues/new/choose).
+Agmen was last run with Claude Code 2.1.329, Codex 0.167 and 0.171, Kimi Code 2.5 and Antigravity CLI 1.5.13, each of them as the primary and as a child. These CLIs change often. If one stops working in a tab after it updates, please [open an issue](https://github.com/cxbxmxcx/agmen/issues/new/choose).
 
 ## What Agmen does
 
@@ -218,7 +218,7 @@ Both read Agmen's settings only from their global config. The first time you sta
 
 Before Agmen first changes one of their files, it keeps a copy beside it as `*.agmen-backup`. **Disconnect**, in **Connect agents…** on the **+** menu, removes exactly what Connect added. Outside Agmen, Agmen's own entries do nothing.
 
-Without Connect, a Kimi Code or Antigravity tab still runs, but its session can't use Agmen's tools, and an Antigravity card can't show whether it's working.
+Without Connect, a Kimi Code or Antigravity tab still runs, but its session can't use Agmen's tools, and an Antigravity card can't show whether it's working. Its card says **No Agmen tools** until you connect the agent and restart the session. The same goes for an agent that is connected to another copy of Agmen: its config names one copy at a time.
 
 ## Keyboard shortcuts
 
@@ -333,7 +333,8 @@ Disconnect Kimi Code and Antigravity in **Connect agents…**, exit Agmen, then 
 - **A child waits with a "trust folder?" badge.** The agent asks once whether to trust a folder it hasn't worked in. Open the tab and answer; the queued task goes in afterwards.
 - **A ✉ badge stays on a card.** A message is waiting, for example because you have text half-typed in that tab. Hover over the badge to see why. Send or clear your text with Ctrl+C, or right-click the card and choose **Type the queued message now** or **Discard queued messages**.
 - **Kimi Code or Antigravity won't start as the primary.** The primary works through Agmen's tools, so Agmen opens **Connect agents…** first. Connect that agent, and choose it again.
-- **A Kimi Code or Antigravity session says it has no Agmen tools.** Run **Connect agents…**, then restart that tab. Connect points the agent at one copy of Agmen; a second copy has to Connect again.
+- **A card says "No Agmen tools".** That Kimi Code or Antigravity session started while its agent wasn't connected to this copy of Agmen. Run **Connect agents…**, then restart that tab. Connect points the agent at one copy of Agmen; a second copy has to Connect again.
+- **Antigravity reads files but won't edit them or run commands.** Agmen 0.1.0 started Antigravity with a read-only set of tools. Update Agmen, then restart the Antigravity tab.
 - **Shift+Enter sends the message when it should add a line.** The `x64\OpenConsole.exe` file next to `Agmen.exe` is missing. Reinstall, or extract the whole zip.
 - **A shortcut key does nothing.** Another app already uses it. Use the tray menu.
 - **The panel shows "unregistered (not saving!)".** A Claude session was started from inside another Claude session, so it isn't saving its transcript. Exit it and start it again from a normal terminal or an Agmen tab.
@@ -352,6 +353,7 @@ Disconnect Kimi Code and Antigravity in **Connect agents…**, exit Agmen, then 
 - **A Codex approval prompt can show as working.** Codex 0.167 doesn't record a pending approval in its session file, so its card stays amber while it waits for you.
 - **Codex asks about updates before anything else.** Started without a first task, Codex opens on its "Update available" question when an update is waiting. Its tab takes no messages until you answer.
 - **Kimi Code ignores the agmen agent.** Its interactive sessions start as its default agent. A Kimi Code tab learns Agmen from the tools' descriptions, and a Kimi Code child also from a note in its first message.
+- **Antigravity falls back to its default agent if it refuses Agmen's.** Agmen starts Antigravity as an `agmen` agent that names the tools it may use, and agy won't run an agent that names a tool it doesn't have. If a later agy drops one of them, a new session starts again as agy's default agent: it keeps its tools and Agmen's, but not Agmen's instructions. A conversation that began as the `agmen` agent keeps it when resumed, and answers with agy's error until you update Agmen.
 - **Antigravity's waiting comes from its log.** It has no hook for a pending confirmation or a stopped turn, so Agmen reads them from the log of the agy process in that tab. If a future agy logs them differently, its card shows busy while it waits on you.
 - **Claude asks to trust your home folder every time.** Claude Code never saves trust for the home folder, so each session that starts there asks first, also after every restore. Start sessions in a project folder.
 - **Session names can change.** Claude Code may give a session a new generated name when it resumes. Use `/rename` inside Claude for a stable one.

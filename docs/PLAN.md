@@ -184,6 +184,18 @@ Built and tested on 2026-11-20 with Claude Code 2.1.329, Codex 0.167, Kimi Code 
 - **Codex asks about updates only when it starts without a task.** That question takes Enter as "Update now". A Codex tab now takes typed messages only once Codex has started Agmen's tool server, which it does after its startup questions.
 - **The card list reacted to typing.** With the list focused, typed letters jumped between cards. Type-to-select is off.
 
+## Antigravity 1.5
+
+Checked on 2026-11-21 with Antigravity 1.5.13, which had updated itself from 1.5.3 the day before.
+
+- **An agent without `tools` is read-only.** A markdown agent that names no tools gets a small default set: it can read files and call MCP tools, but it has no `edit_file`, `write_file`, `run_command` or `ask_question`. The `agmen` agent named none, so Antigravity sessions in Agmen couldn't change anything. It now names 13 tools: the default agent's own, apart from the three an agent may not ask for by name. With them, a probe agent listed the same tools as the default agent, apart from `swarm`.
+- **An unknown tool name stops the agent.** When an agent names a tool agy doesn't have, agy can't build it: "failed to construct executor: … tool … not found in registry". In print mode agy exits. In a tab it stays open, answers every message with that error and fires no hooks. `swarm`, `list_resources` and `read_resource` are in the default agent's list but aren't names an agent may ask for. So Agmen reads that refusal from agy's log and starts a new session again as agy's default agent, with the message that failed. A resumed conversation keeps its agent whatever the command line says, so it can't fall back.
+- **A question shows in the log.** `ask_question` logs "Surfacing ask_question", as a tool confirmation logs "Surfacing tool confirmation". Agmen shows both as waiting, in a connected tab: only hooks end what the log starts, and an unconnected tab fires none.
+- **A turn can end while it waits.** When the user cancels a turn or dismisses a question, the status goes from waiting straight to idle. That now counts as the end of the turn, so the parent hears of it.
+- **Hooks still work.** All four fire in 1.5.13, with `conversationId`, `transcriptPath` and `modelName`.
+- **`inheritCustomizations` exists now.** It decides whether an agent adopts the user's skills, rules, plugins, subagents and MCP servers. `inheritMcp` still brings the MCP servers on its own, so the agent keeps it.
+- **A session without tools looked like any other.** A Kimi Code or Antigravity session that starts while its agent points at another copy of Agmen has none of this copy's tools. Agmen offered Connect once per run and not at all for restored tabs. The card now says "No Agmen tools".
+
 ## Sources
 
 - Kimi Code: [MCP](https://moonshotai.github.io/kimi-code/en/customization/mcp), [hooks](https://moonshotai.github.io/kimi-code/en/customization/hooks)
