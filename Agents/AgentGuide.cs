@@ -59,8 +59,21 @@ public static class AgentGuide
         Text + "\n";
 
     /// <summary>
-    /// Antigravity's agmen agent: its default agent with the guide added, the user's own MCP
-    /// servers and Agmen's, and never offered as a subagent.
+    /// The tools Antigravity's agmen agent asks for: the ones its default agent has. An agent
+    /// that names none gets only a small read-only set, with no file edits, no commands and no
+    /// questions. MCP tools come with inheritMcp and aren't named here. agy won't run an agent
+    /// that names a tool it doesn't have, so this list holds only names agy 1.5 accepts, and a
+    /// new session whose agent agy refuses starts again as agy's default agent.
+    /// </summary>
+    public static readonly string[] AntigravityTools =
+    {
+        "read_file", "edit_file", "write_file", "run_command", "manage_task", "search_web", "ask_question",
+        "schedule", "send_message", "define_subagent", "invoke_subagent", "manage_subagents", "run_workflow",
+    };
+
+    /// <summary>
+    /// Antigravity's agmen agent: its default agent with the guide added, its default agent's
+    /// tools, the user's own MCP servers and Agmen's, and never offered as a subagent.
     /// </summary>
     public static string AntigravityAgent() =>
         "---\n" +
@@ -69,6 +82,7 @@ public static class AgentGuide
         "mainAgent: true\n" +
         "subagent: false\n" +
         "inheritMcp: true\n" +
+        $"tools: [{string.Join(", ", AntigravityTools)}]\n" +
         "---\n\n" +
         "# Agmen\n\n" +
         Text + "\n";
