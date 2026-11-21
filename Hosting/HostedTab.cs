@@ -177,6 +177,10 @@ public sealed class HostedTab : INotifyPropertyChanged
             _deliveredOrigin = "parent";
         }
         _turnStartedBy = "user";
+        // Kept in case agy refuses the agent and the session has to start again with its first message.
+        _firstPrompt = _promptOnCommandLine;
+        _firstPromptReportTo = ReportFirstPromptTo;
+        _lastDelivered = null;
         _promptOnCommandLine = null;
         ReportFirstPromptTo = null;
         ToolServerSeen = false;
@@ -230,6 +234,7 @@ public sealed class HostedTab : INotifyPropertyChanged
     private string? OtherAgentCommand(out bool withPrompt)
     {
         withPrompt = false;
+        _startedWithAgent = false;
         var prompt = SessionId is null && !string.IsNullOrWhiteSpace(InitialPrompt) ? InitialPrompt : null;
         InitialPrompt = null;
         var cmd = new System.Text.StringBuilder();
@@ -294,7 +299,12 @@ public sealed class HostedTab : INotifyPropertyChanged
                 cmd.Append(Quote(agy));
                 // The agmen agent, Antigravity's default with Agmen's guide, also on resume, so a
                 // conversation started before Connect picks it up.
-                if (AgentConnect.AgentFor(AgentKind.Antigravity) is { } agyAgent) cmd.Append(" --agent ").Append(agyAgent);
+                // Not after agy refused to run it: see TakeAgentRefusal.
+                if (!WithoutAgent && AgentConnect.AgentFor(AgentKind.Antigravity) is { } agyAgent)
+                {
+                    cmd.Append(" --agent ").Append(agyAgent);
+                    _startedWithAgent = true;
+                }
                 foreach (var arg in AgentSettings.AntigravityArgs(Launch)) cmd.Append(' ').Append(QuoteArg(arg));
                 if (SessionId is not null) cmd.Append(" --conversation ").Append(QuoteArg(SessionId));
                 else if (prompt is not null)
@@ -437,12 +447,15 @@ public sealed class HostedTab : INotifyPropertyChanged
                 _deliveredAt = null;
                 _inFlightStarted = _inFlight is not null;
             }
+            _lastDelivered = null;   // it started its turn
         }
         if (_lastStatus == "busy" && status != "busy" && _busyIsWork) alert = status == "waiting" ? "waiting" : "finished";
         else if (status == "waiting" && _lastStatus is not null && _lastStatus != "waiting") alert = "waiting";
+        // A turn can also end while it waits on the user: they cancel it, or dismiss its question.
+        else if (_lastStatus == "waiting" && AtRest(status) && _busyIsWork) alert = "finished";
         // A turn its parent started is the parent's to follow up, not the user's.
         if (alert == "finished" && _turnStartedBy == "parent") alert = null;
-        if (_lastStatus == "busy" && AtRest(status) && _inFlight is not null && _inFlightStarted)
+        if (_lastStatus is "busy" or "waiting" && AtRest(status) && _inFlight is not null && _inFlightStarted)
         {
             _turnReport = (_inFlight, "idle");
             _inFlight = null;
@@ -494,6 +507,44 @@ public sealed class HostedTab : INotifyPropertyChanged
             if (TrustQuestion.IsMatch(text)) _trustQuestion = true;
             _screenTail = text.Length > 80 ? text[^80..] : text;
         }
+    }
+
+    private bool _startedWithAgent;
+    private string? _firstPrompt;
+    private Guid? _firstPromptReportTo;
+    private OutboxMessage? _lastDelivered;
+
+    /// <summary>
+    /// Start Antigravity as its default agent, not the agmen agent. Set for as long as this tab
+    /// stays open, once agy has refused to run the agmen agent in it.
+    /// </summary>
+    public bool WithoutAgent { get; private set; }
+
+    /// <summary>
+    /// True once, when this tab should start again as agy's default agent because agy refuses to
+    /// run the agmen agent. agy does that when the agent names a tool this version of agy doesn't
+    /// have: the session stays open and answers every message with that error. The default agent
+    /// has the same tools, and Agmen's. The message that got the error goes back to be passed
+    /// again: the first message from the command line, or the one Agmen typed in. Only a new
+    /// session can do this. A resumed conversation keeps its agent whatever the command line says.
+    /// </summary>
+    public bool TakeAgentRefusal()
+    {
+        if (Agent != AgentKind.Antigravity || !_startedWithAgent || WithoutAgent || State != TabState.Running || SessionId is not null)
+            return false;
+        WithoutAgent = true;
+        if (_firstPrompt is not null)
+        {
+            InitialPrompt = _firstPrompt;
+            ReportFirstPromptTo = _firstPromptReportTo;
+        }
+        if (_lastDelivered is { } typed)
+        {
+            _outbox.Insert(0, typed);
+            RaiseQueue();
+        }
+        _turnReport = null;   // no turn ended: the message starts one in the new session
+        return true;
     }
 
     private static readonly Regex TrustQuestion = new(@"trust\s+this\s+folder", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -620,6 +671,7 @@ public sealed class HostedTab : INotifyPropertyChanged
         _deliveredOrigin = next.Origin;
         _inFlight = next.ReportBack ? next : null;
         _inFlightStarted = false;
+        _lastDelivered = next;
         TypeMessage(ctl, next.Text);
         Log.Write($"tab {ShortId}: delivered a message from {next.Origin} ({next.Text.Length} chars)");
         RaiseQueue();
@@ -746,6 +798,28 @@ public sealed class HostedTab : INotifyPropertyChanged
     }
 
     public bool HasNote => !string.IsNullOrEmpty(_note);
+
+    private string? _toolsMissing;
+
+    /// <summary>
+    /// Why this session has none of Agmen's tools and what to do about it, when its agent wasn't
+    /// connected to this copy of Agmen as the session started; null when it has them. Its card
+    /// says "No Agmen tools" until the session starts again connected.
+    /// </summary>
+    public string? ToolsMissing
+    {
+        get => _toolsMissing;
+        set
+        {
+            if (_toolsMissing == value) return;
+            _toolsMissing = value;
+            Raise(string.Empty);
+        }
+    }
+
+    public bool HasToolsMissing => _toolsMissing is not null;
+
+    public string ToolsMissingTooltip => _toolsMissing ?? "";
 
     // ------------------------------------------------------ what the card shows
 
@@ -947,6 +1021,7 @@ public sealed class HostedTab : INotifyPropertyChanged
         + (_parentTitle is not null ? $"\nchild of {_parentTitle}" : "")
         + (_childCount > 0 ? $"\n{_childCount} child session{(_childCount == 1 ? "" : "s")}" : "")
         + (HasNote ? $"\n{Note}" : "")
+        + (_toolsMissing is not null ? $"\n{_toolsMissing}" : "")
         + $"\n{Cwd}\nsession {SessionId ?? "(new, not registered yet)"}" + (Pid > 0 ? $"\npid {Pid}" : "")
         + "\nRight-click to color-code or for more actions";
 

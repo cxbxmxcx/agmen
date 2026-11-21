@@ -13,7 +13,8 @@ namespace Agmen.Agents;
 public sealed record AgentTabRef(Guid Id, AgentKind Agent, string Cwd, int Pid, DateTime StartedAt, string? SessionId);
 
 /// <summary>What the monitor knows about one tab's session beyond its status.</summary>
-public sealed record AgentSessionState(string? SessionId, int TurnsCompleted, string? Transcript, string? LastReply);
+public sealed record AgentSessionState(string? SessionId, int TurnsCompleted, string? Transcript, string? LastReply,
+                                       bool AgentRefused = false);
 
 /// <summary>
 /// Follows the sessions of agents that have no live registry like Claude Code's, and reports
@@ -46,6 +47,10 @@ public sealed class AgentMonitor
         public string? Transcript;
         public string? LastReply;
         public DateTime LastSearch = DateTime.MinValue;
+        /// <summary>Antigravity: a hook has fired in this run of the tab, so hooks will also end what its log starts.</summary>
+        public bool HooksSeen;
+        /// <summary>Antigravity: its log says it can't build the agent the session runs as.</summary>
+        public bool AgentRefused;
     }
 
     /// <summary>On a first read of a long session, only its last few megabytes matter for status.</summary>
@@ -108,6 +113,7 @@ public sealed class AgentMonitor
                     t.LastReply = Str(payload, "last-assistant-message") ?? t.LastReply;
                     break;
                 case (AgentKind.Antigravity, _):
+                    t.HooksSeen = true;
                     t.SessionId = Str(payload, "conversationId") ?? t.SessionId;
                     t.Transcript = Str(payload, "transcriptPath") is { Length: > 0 } path ? Path.GetFullPath(path) : t.Transcript;
                     t.Model = Str(payload, "modelName") ?? t.Model;
@@ -126,7 +132,7 @@ public sealed class AgentMonitor
     public AgentSessionState? StateOf(Guid tabId)
     {
         lock (_gate)
-            return _tracks.TryGetValue(tabId, out var t) ? new AgentSessionState(t.SessionId, t.TurnsCompleted, t.Transcript, t.LastReply) : null;
+            return _tracks.TryGetValue(tabId, out var t) ? new AgentSessionState(t.SessionId, t.TurnsCompleted, t.Transcript, t.LastReply, t.AgentRefused) : null;
     }
 
     private Track TrackFor(AgentTabRef tab)
@@ -287,16 +293,39 @@ public sealed class AgentMonitor
                 || !DateTime.TryParseExact(file.Name[4..^4], "yyyyMMdd_HHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var started)
                 || started < tab.StartedAt.AddSeconds(-5) || started > tab.StartedAt.AddSeconds(60))
                 continue;
-            // From here on only: the hooks have reported what happened before.
-            t.Offset = file.Length;
+            // Status from here on only: the hooks have reported what happened before. But agy may
+            // already have refused the agent, which no hook reports.
+            long read = 0;
+            foreach (var line in ReadNewLines(file.FullName, ref read))
+                if (IsAgentRefusal(line)) t.AgentRefused = true;
+            t.Offset = read;
             return file.FullName;
         }
         return null;
     }
 
+    /// <summary>
+    /// agy's log line for an agent it can't build, as when the agent names a tool this agy doesn't
+    /// have: "failed to construct executor: … tool "x" not found in registry". The session stays
+    /// open and answers every message with it.
+    /// </summary>
+    private static bool IsAgentRefusal(string line) =>
+        line.Contains("] failed to construct executor:", StringComparison.Ordinal)
+        && line.Contains("not found in registry", StringComparison.Ordinal);
+
     private static void ApplyAntigravityLog(string line, Track t)
     {
-        if (line.Contains("Surfacing tool confirmation", StringComparison.Ordinal)) t.Status = "waiting";
+        if (IsAgentRefusal(line))
+        {
+            t.AgentRefused = true;
+            return;
+        }
+        // Only hooks end what the log starts. A tab whose agent isn't connected fires none, so a
+        // status read from its log would never clear.
+        if (!t.HooksSeen) return;
+        // A tool that needs the user's OK, or a question the agent asks them (ask_question).
+        if (line.Contains("Surfacing tool confirmation", StringComparison.Ordinal)
+            || line.Contains("Surfacing ask_question", StringComparison.Ordinal)) t.Status = "waiting";
         else if (line.Contains("Responding to tool confirmation", StringComparison.Ordinal)) t.Status = "busy";
         else if (line.Contains("Cancelling in-progress response", StringComparison.Ordinal)) t.Status = "idle";
         else return;

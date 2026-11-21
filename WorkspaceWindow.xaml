@@ -108,6 +108,7 @@
                                 <RowDefinition/>
                                 <RowDefinition/>
                                 <RowDefinition/>
+                                <RowDefinition/>
                             </Grid.RowDefinitions>
 
                             <!-- Status dot: amber pulse = working, blue = waiting for input, gray = not running -->
@@ -177,15 +178,21 @@
                             <Button Grid.Row="1" Grid.Column="2" Content="&#x2715;" Style="{StaticResource GlyphButton}"
                                     Margin="8,2,0,0" ToolTip="Close tab" Click="OnCardCloseClick"/>
 
-                            <TextBlock x:Name="Branch" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                            <!-- A Kimi Code or Antigravity session that started while its agent wasn't connected to this copy -->
+                            <TextBlock x:Name="ToolsLine" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                                       Text="No Agmen tools" FontSize="11" FontWeight="SemiBold" Margin="0,3,0,0"
+                                       Foreground="#FFFF9F5A" TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding ToolsMissingTooltip}" Visibility="Collapsed"/>
+
+                            <TextBlock x:Name="Branch" Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
                                        Text="{Binding BranchText}" FontSize="11" Margin="0,3,0,0"
                                        Foreground="#FF8FBCA8" TextTrimming="CharacterEllipsis"/>
 
-                            <TextBlock x:Name="NoteLine" Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
+                            <TextBlock x:Name="NoteLine" Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
                                        Text="{Binding Note}" FontSize="11" Margin="0,3,0,0" FontStyle="Italic"
                                        Foreground="#FFB7B7C9" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
 
-                            <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,6,0,1">
+                            <StackPanel Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,6,0,1">
                                 <ProgressBar Style="{StaticResource ThinBar}"
                                              Value="{Binding Session.ContextPercent, Mode=OneWay, FallbackValue=0}"
                                              Foreground="{Binding Session.CtxBarBrush, FallbackValue={StaticResource AccentIdle}}"
@@ -199,6 +206,9 @@
                         <DataTemplate.Triggers>
                             <DataTrigger Binding="{Binding NeedsAttention}" Value="True">
                                 <Setter TargetName="AttentionPill" Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding HasToolsMissing}" Value="True">
+                                <Setter TargetName="ToolsLine" Property="Visibility" Value="Visible"/>
                             </DataTrigger>
                             <DataTrigger Binding="{Binding HasQueued}" Value="True">
                                 <Setter TargetName="QueuePill" Property="Visibility" Value="Visible"/>

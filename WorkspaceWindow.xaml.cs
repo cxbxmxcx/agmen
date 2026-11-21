@@ -475,6 +475,9 @@ public partial class WorkspaceWindow : Window
                                      && was != AgentConnect.State.Connected
                                      && AgentConnect.StateOf(t.Agent) == AgentConnect.State.Connected).ToList();
         if (stale.Count == 0) return;
+        // Connected now, but these sessions started without the tools and keep running that way until restarted.
+        foreach (var t in stale)
+            t.ToolsMissing = $"{AgentProfiles.DisplayName(t.Agent)} is connected now, but this session started before that. Restart it to get Agmen's tools.";
         var names = string.Join(", ", stale.Select(t => $"'{t.Title}'"));
         if (Confirm($"{names} started before {(stale.Count == 1 ? "its agent was" : "their agents were")} connected. "
                     + $"Restart {(stale.Count == 1 ? "it" : "them")} now to get Agmen's tools?", "Connect agents"))
@@ -520,6 +523,10 @@ public partial class WorkspaceWindow : Window
             }
             catch (Exception ex) { Log.Write($"tab {tab.Title}: couldn't write the tool server config: {ex.Message}"); }
         }
+        // Kimi Code and Antigravity get Agmen's tools only when connected to this copy. A session
+        // that starts without them says so on its card, however it was started.
+        tab.ToolsMissing = AgentConnect.ToolsMissingReason(tab.Agent);
+        if (tab.ToolsMissing is { } missing) Log.Write($"tab {tab.Title}: starting without Agmen's tools: {missing}");
         long prepared = watch.ElapsedMilliseconds;
         var ctl = tab.Start();
         if (ctl is not null)
@@ -578,6 +585,18 @@ public partial class WorkspaceWindow : Window
         if (!_tabs.Contains(tab) || tab.State is not (TabState.Running or TabState.Starting)) return;
         Log.Write($"tab {tab.Title}: restarting");
         // The conversation must not be open in the old process and the new one at once.
+        await tab.StopForRestartAsync(TimeSpan.FromSeconds(5));
+        if (_tabs.Contains(tab)) StartTab(tab);
+    }
+
+    /// <summary>
+    /// Stop an Antigravity session that agy won't run as the agmen agent, and start it again as
+    /// agy's default agent, which has the same tools and Agmen's.
+    /// </summary>
+    private async void RestartAsDefaultAgent(HostedTab tab)
+    {
+        Log.Write($"tab {tab.Title}: Antigravity refused the agmen agent, so the session starts again as its default agent");
+        Notice($"Antigravity refused Agmen's agent, so '{tab.Title}' starts again as its default agent. Update Agmen if this keeps happening.");
         await tab.StopForRestartAsync(TimeSpan.FromSeconds(5));
         if (_tabs.Contains(tab)) StartTab(tab);
     }
@@ -704,6 +723,12 @@ public partial class WorkspaceWindow : Window
             var idBefore = tab.SessionId;
             var stateBefore = tab.State;
             string? alert = tab.Poll() ? "ended" : null;
+            // agy refuses to run the agmen agent in this new session: start it again as agy's default agent.
+            if (tab.Agent == AgentKind.Antigravity && Agents.StateOf(tab.Id) is { AgentRefused: true } && tab.TakeAgentRefusal())
+            {
+                RestartAsDefaultAgent(tab);
+                continue;
+            }
             SessionInfo? info = null;
             if (tab.Agent != AgentKind.Claude)
             {
@@ -782,11 +807,14 @@ public partial class WorkspaceWindow : Window
         else
         {
             HeaderTitle.Text = tab.IsPrimary ? "Primary session" : tab.Title;
-            var parts = new List<string>
+            var parts = new List<string>();
+            // First, so a long folder path can't push it out of view.
+            if (tab.HasToolsMissing) parts.Add("no Agmen tools");
+            parts.AddRange(new[]
             {
                 tab.IsPrimary ? $"{AgentProfiles.DisplayName(tab.Agent)}, reads and directs your sessions" : $"{AgentProfiles.DisplayName(tab.Agent)} in {tab.Cwd}",
                 tab.StatusText,
-            };
+            });
             if (tab.ParentTitle is { } parentTitle) parts.Add($"child of {parentTitle}");
             if (tab.HasChildren) parts.Add($"{tab.ChildCount} child session{(tab.ChildCount == 1 ? "" : "s")}");
             if (!string.IsNullOrEmpty(tab.BranchText)) parts.Add(tab.BranchText);

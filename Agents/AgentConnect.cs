@@ -71,10 +71,7 @@ public static class AgentConnect
             var hooks = agent == AgentKind.Antigravity ? Read(AntigravityHooksFile)?[Key] as JsonObject : new JsonObject();
             bool approved = agent == AgentKind.Kimi ? KimiRuleRange(KimiConfigLines()) is not null : HasAntigravityGrant();
             if (server is null || hooks is null || !approved || !File.Exists(AgentFile(agent))) return State.NotConnected;
-            bool here = server["command"] is JsonValue c && c.TryGetValue<string>(out var command)
-                        && string.Equals(Path.GetFullPath(command), Path.GetFullPath(ToolServer.Exe), StringComparison.OrdinalIgnoreCase)
-                        && server["env"]?["AGMEN_INSTANCE"] is JsonValue i && i.TryGetValue<string>(out var instance)
-                        && instance == AppPaths.InstanceName;
+            bool here = IsThisCopy(server);
             // Hooks that differ from what this copy writes, such as an older Agmen's, need Connect again.
             if (here && agent == AgentKind.Antigravity && !JsonNode.DeepEquals(hooks, AntigravityHooks())) return State.NotConnected;
             return here ? State.Connected : State.ConnectedElsewhere;
@@ -92,6 +89,45 @@ public static class AgentConnect
             ? "Not connected. Its tabs can't show when they're working, and its sessions can't use Agmen's tools."
             : "Not connected. Its tabs still show their status, but its sessions can't use Agmen's tools.",
     };
+
+    /// <summary>Whether an agent's agmen server entry starts this copy of Agmen's tool server, for this instance.</summary>
+    private static bool IsThisCopy(JsonObject? server) =>
+        server is not null
+        && server["command"] is JsonValue c && c.TryGetValue<string>(out var command)
+        && string.Equals(Path.GetFullPath(command), Path.GetFullPath(ToolServer.Exe), StringComparison.OrdinalIgnoreCase)
+        && server["env"]?["AGMEN_INSTANCE"] is JsonValue i && i.TryGetValue<string>(out var instance)
+        && instance == AppPaths.InstanceName;
+
+    /// <summary>
+    /// Why a session of this agent that starts now has none of this copy's tools, and what to do,
+    /// in words for its card; null when it has them. Kimi Code and Antigravity read Agmen's tool
+    /// server from their global config, which names one copy of Agmen.
+    /// </summary>
+    public static string? ToolsMissingReason(AgentKind agent)
+    {
+        if (!Connectable.Contains(agent)) return null;
+        var name = AgentProfiles.DisplayName(agent);
+        const string remedy = " Choose Connect agents… on the + menu, then restart this session.";
+        switch (StateOf(agent))
+        {
+            case State.Connected:
+            case State.NotInstalled:
+                return null;
+            case State.ConnectedElsewhere:
+                return $"{name} is connected to another copy of Agmen, so this session has none of this copy's tools." + remedy;
+            case State.Unreadable:
+                return $"Agmen can't read {name}'s config, so this session may have none of Agmen's tools.";
+            default:
+                // Partly connected, such as hooks an older Agmen wrote: the tool server is this
+                // copy's, so the session has the tools.
+                try
+                {
+                    if (IsThisCopy(Read(McpFile(agent))?["mcpServers"]?[Key] as JsonObject)) return null;
+                }
+                catch (Exception) { /* unreadable after all: say it isn't connected */ }
+                return $"{name} isn't connected to Agmen, so this session has none of Agmen's tools." + remedy;
+        }
+    }
 
     /// <summary>
     /// The agent to start a new session with: agmen when this copy of Agmen is connected, after
