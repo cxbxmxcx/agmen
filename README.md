@@ -92,7 +92,7 @@ Agmen looks for each agent on your PATH. An agent it can't find shows as **(not 
 
 Tabs, the tree and the primary session work with any of the four, so one agent is enough. Only the floating session panel is limited to Claude Code sessions.
 
-Agmen was last run with Claude Code 2.1.329, Codex 0.167 and 0.171, Kimi Code 2.5 and Antigravity CLI 1.5.13, each of them as the primary and as a child. These CLIs change often. If one stops working in a tab after it updates, please [open an issue](https://github.com/cxbxmxcx/agmen/issues/new/choose).
+Agmen 0.2.2 was last run with Claude Code 2.1.331 as the primary, and Codex 0.171, Kimi Code 2.7 and Antigravity CLI 1.5.15 as its children. Agmen 0.1 also ran each of them as the primary. These CLIs change often. If one stops working in a tab after it updates, please [open an issue](https://github.com/cxbxmxcx/agmen/issues/new/choose).
 
 ## What Agmen does
 

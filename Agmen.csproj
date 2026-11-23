@@ -9,7 +9,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Agmen</AssemblyName>
     <RootNamespace>Agmen</RootNamespace>
-    <Version>0.1.1</Version>
+    <Version>0.2.2</Version>
     <!-- Program.Main decides between the tray app and the headless MCP server (dash-dash-mcp). -->
     <StartupObject>Agmen.Program</StartupObject>
     <SelfContained>false</SelfContained>
