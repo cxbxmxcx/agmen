@@ -50,17 +50,91 @@ trap {
 function Write-Step([string]$Text) { Write-Host "==> $Text" -ForegroundColor Cyan }
 
 $zipName = 'Agmen-win-x64.zip'
-$InstallDir = [IO.Path]::GetFullPath($InstallDir)
+$managedKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Agmen_is1'
+$registered = Get-ItemProperty -LiteralPath $managedKey -ErrorAction SilentlyContinue
+
+function Resolve-InstallDirectory([string]$Requested, [bool]$Explicit, [string]$RegisteredDir, [bool]$PortableOperation) {
+    $requestedPath = [IO.Path]::GetFullPath($Requested)
+    if (-not $RegisteredDir) { return $requestedPath }
+    if (-not [IO.Path]::IsPathRooted($RegisteredDir)) { throw 'The registered Agmen install location is invalid.' }
+    $registeredPath = [IO.Path]::GetFullPath($RegisteredDir)
+    if (-not $Explicit) { return $registeredPath }
+    if (-not $PortableOperation -and $requestedPath.TrimEnd('\') -ine $registeredPath.TrimEnd('\')) {
+        throw "Agmen is registered in $registeredPath. Omit -InstallDir to update it there. Use -ZipPath for a separate portable copy."
+    }
+    return $requestedPath
+}
+
+$InstallDir = Resolve-InstallDirectory $InstallDir ($PSBoundParameters.ContainsKey('InstallDir')) $registered.InstallLocation ([bool]($ZipPath -or $Uninstall))
 $exe = Join-Path $InstallDir 'Agmen.exe'
+$manifestPath = Join-Path $InstallDir '.agmen-portable-files.json'
 $startMenuLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Agmen.lnk'
 $startupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Agmen.lnk'
 
 # Refuse to delete a folder that does not look like an Agmen install.
 function Assert-SafeInstallDir {
     if (-not (Test-Path $InstallDir)) { return }
+    $root = Get-Item -LiteralPath $InstallDir -Force
+    if (-not $root.PSIsContainer -or $root.Parent -eq $null -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Choose a regular directory for the installation: $InstallDir"
+    }
     $hasContent = @(Get-ChildItem -LiteralPath $InstallDir -Force).Count -gt 0
     if ($hasContent -and -not (Test-Path $exe)) {
         throw "$InstallDir already exists and does not contain Agmen.exe. Choose another -InstallDir."
+    }
+}
+
+# Legacy zip builds shipped these binaries before the PowerShell installer recorded ownership.
+# Their notices have generic names, so leave those in place when the old install has no manifest.
+function Get-PortableFiles {
+    if (Test-Path -LiteralPath $manifestPath) {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($manifest.Format -ne 'AgmenPortable/1' -or -not $manifest.Files) { throw 'Invalid Agmen portable install manifest.' }
+        return $manifest.Files
+    }
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return }
+    foreach ($name in 'Agmen.exe', 'conpty.dll', 'Microsoft.Terminal.Control.dll', 'D3DCompiler_47_cor3.dll',
+        'PenImc_cor3.dll', 'PresentationNative_cor3.dll', 'vcruntime140_cor3.dll', 'wpfgfx_cor3.dll', 'x64\OpenConsole.exe') {
+        if (Test-Path -LiteralPath (Join-Path $InstallDir $name) -PathType Leaf) { [pscustomobject]@{Path=$name; SHA256=$null} }
+    }
+}
+
+function Resolve-PayloadFile([string]$Relative) {
+    $full = $InstallDir
+    foreach ($part in ($Relative -split '[/\\]')) {
+        if (-not $part -or $part -in '.', '..' -or $part.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or $part -match '[ .]$') {
+            throw "Invalid portable package path: $Relative"
+        }
+        $full = Join-Path $full $part
+        $item = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Unexpected link in the install: $full" }
+    }
+    return $full
+}
+
+function Remove-PortableFiles {
+    $dirs = @{}
+    $files = @(Get-PortableFiles)
+    # Validate every manifest path before touching the first file.
+    $targets = @(foreach ($file in $files) { Resolve-PayloadFile $file.Path })
+    for ($i = 0; $i -lt $targets.Count; $i++) {
+        $target = $targets[$i]
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { continue }
+        if ($files[$i].SHA256 -and (Get-FileHash -LiteralPath $target).Hash -ne $files[$i].SHA256) {
+            Write-Host "Keeping modified file: $target"
+            continue
+        }
+        Remove-Item -LiteralPath $target -Force
+        for ($dir = Split-Path $target -Parent; $dir -and $dir.TrimEnd('\') -ine $InstallDir.TrimEnd('\'); $dir = Split-Path $dir -Parent) {
+            $dirs[$dir] = $true
+        }
+    }
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) { Remove-Item -LiteralPath $manifestPath -Force }
+    $dirs[$InstallDir] = $true
+    foreach ($dir in ($dirs.Keys | Sort-Object Length -Descending)) {
+        if ([IO.Directory]::Exists($dir) -and [IO.Directory]::GetFileSystemEntries($dir).Length -eq 0) {
+            [IO.Directory]::Delete($dir, $false)
+        }
     }
 }
 
@@ -114,6 +188,14 @@ function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments = '') {
     $link.Save()
 }
 
+# Keep the native installer's record of the files it owns when this script is used for an update or removal.
+$managedHere = $registered -and $registered.InstallLocation -and
+    $registered.InstallLocation.TrimEnd('\') -ieq $InstallDir.TrimEnd('\')
+if (-not $managedHere -and (Test-Path -LiteralPath $InstallDir -PathType Container) -and
+    @(Get-ChildItem -LiteralPath $InstallDir -Filter 'unins*.dat' -File).Count -gt 0) {
+    throw "The directory $InstallDir already has a native uninstaller. Use its own uninstaller or repair the Agmen registration."
+}
+
 # ---------------------------------------------------------------- uninstall
 
 if ($Uninstall) {
@@ -126,13 +208,24 @@ if ($Uninstall) {
                "and Disconnect, then uninstall again. Or rerun with -Force to uninstall anyway and clean their config by hand.")
     }
     Stop-RunningCopy
+    if ($managedHere) {
+        $remove = $registered.UninstallString.Trim('"')
+        if ((Split-Path $remove -Parent) -ine $InstallDir.TrimEnd('\') -or
+            (Split-Path $remove -Leaf) -notmatch '^unins\d{3}\.exe$') { throw 'Unexpected registered Agmen uninstaller path.' }
+        $removeOptions = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+        if ($Force) { $removeOptions += '/KEEPAGENTCONFIG=1' }
+        $result = Start-Process -FilePath $remove -ArgumentList $removeOptions -WindowStyle Hidden -Wait -PassThru
+        if ($result.ExitCode -ne 0) { throw "Uninstallation failed ($($result.ExitCode))." }
+        Write-Host "Agmen removed. Saved workspaces remain in $env:APPDATA." -ForegroundColor Green
+        exit 0
+    }
     foreach ($link in $startMenuLink, $startupLink) {
         if (Test-Path $link) {
             $target = (New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath
             if ($target -ieq $exe) { Remove-Item $link -Force }
         }
     }
-    if (Test-Path $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
+    Remove-PortableFiles
     Write-Host "Agmen removed. Settings and saved tabs remain in $env:APPDATA\Agmen." -ForegroundColor Green
     if ($connected.Count -gt 0) {
         Write-Warning ("$($connected -join ' and ') still have an agmen entry in their config. Remove it from " +
@@ -152,7 +245,14 @@ $work = Join-Path ([IO.Path]::GetTempPath()) ('Agmen-install-' + [Guid]::NewGuid
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
     if ($ZipPath) {
+        if ($managedHere) { throw 'Run Agmen-Setup-x64.exe to update this installer-managed copy. Use a separate folder for a portable zip.' }
         $zip = Get-Item -LiteralPath $ZipPath
+        if (Test-Path -LiteralPath ($zip.FullName + '.sha256') -PathType Leaf) {
+            $expected = ((Get-Content -LiteralPath ($zip.FullName + '.sha256') -Raw).Trim() -split '\s+')[0]
+            if ($expected -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $zip.FullName).Hash -ne $expected) {
+                throw 'The portable zip failed its checksum.'
+            }
+        }
         Write-Step "Installing from $($zip.FullName)"
     }
     else {
@@ -160,6 +260,36 @@ try {
         $base = if ($Version -eq 'latest') { "https://github.com/$Repo/releases/latest/download" }
                 else { "https://github.com/$Repo/releases/download/$Version" }
         Write-Step "Downloading Agmen ($Version) from github.com/$Repo"
+        # Modern releases use the same installer for scripted and interactive upgrades.
+        $setupName = 'Agmen-Setup-x64.exe'
+        $setupPath = Join-Path $work $setupName
+        $haveSetup = $false
+        try {
+            Invoke-WebRequest -Uri "$base/$setupName" -OutFile $setupPath -UseBasicParsing
+            $haveSetup = $true
+        }
+        catch {
+            if ($null -eq $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 404) { throw }
+            if ($managedHere) { throw 'This release predates the Windows installer and cannot upgrade this installed copy.' }
+            # Old release tags only ship the portable zip.
+        }
+        if ($haveSetup) {
+            $digest = (Invoke-WebRequest -Uri "$base/$setupName.sha256" -UseBasicParsing).Content
+            if ($digest -is [byte[]]) { $digest = [Text.Encoding]::ASCII.GetString($digest) }
+            $digest = ($digest.Trim() -split '\s+')[0]
+            if ($digest -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash -ne $digest) {
+                throw 'The setup executable failed its release checksum.'
+            }
+            Stop-RunningCopy
+            $options = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR="' + $InstallDir + '"'))
+            if ($NoStartup -or $NoShortcuts) { $options += '/TASKS="!startup"' }
+            if ($NoShortcuts) { $options += '/NOICONS' }
+            $result = Start-Process -FilePath $setupPath -ArgumentList $options -WindowStyle Hidden -Wait -PassThru
+            if ($result.ExitCode -ne 0) { throw "Agmen Setup failed ($($result.ExitCode))." }
+            Write-Host "Agmen is installed in $InstallDir." -ForegroundColor Green
+            if (-not $NoLaunch) { Start-Process -FilePath $exe -ArgumentList '--workspace' }
+            return
+        }
         $zipFile = Join-Path $work $zipName
         try { Invoke-WebRequest -Uri "$base/$zipName" -OutFile $zipFile -UseBasicParsing }
         catch { throw "Download failed: $($_.Exception.Message) Check https://github.com/$Repo/releases for that release." }
@@ -189,9 +319,23 @@ try {
 
     Stop-RunningCopy
     Write-Step "Installing to $InstallDir"
-    if (Test-Path $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
+    # Keep unrelated files in a legacy installation during an update.
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item -Path (Join-Path $newExe.DirectoryName '*') -Destination $InstallDir -Recurse -Force
+    $owned = @{}
+    foreach ($file in @(Get-PortableFiles)) { $owned[$file.Path] = $file }
+    foreach ($source in Get-ChildItem -LiteralPath $newExe.DirectoryName -File -Recurse -Force) {
+        $relative = $source.FullName.Substring($newExe.DirectoryName.Length + 1)
+        if ($relative -ieq '.agmen-portable-files.json') { throw 'The package contains a reserved installer filename.' }
+        $target = Resolve-PayloadFile $relative
+        [void][IO.Directory]::CreateDirectory((Split-Path $target -Parent))
+        Copy-Item -LiteralPath $source.FullName -Destination $target -Force
+        $owned[$relative] = [pscustomobject]@{ Path = $relative; SHA256 = (Get-FileHash -LiteralPath $source.FullName).Hash }
+    }
+    $manifest = @{ Format='AgmenPortable/1'; Files=@($owned.Values) } | ConvertTo-Json -Depth 3
+    $stagedManifest = Join-Path $InstallDir ('.agmen-manifest-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    [IO.File]::WriteAllText($stagedManifest, $manifest)
+    if (Test-Path -LiteralPath $manifestPath) { [IO.File]::Replace($stagedManifest, $manifestPath, [NullString]::Value) }
+    else { [IO.File]::Move($stagedManifest, $manifestPath) }
 }
 finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

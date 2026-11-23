@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Builds the self-contained Agmen release: a folder you can run, and the zip a release ships.
+    Builds the self-contained Agmen release folder, portable zip, and offline Windows installer.
 
 .DESCRIPTION
     Publishes Agmen for 64-bit Windows with the .NET runtime inside Agmen.exe, so the people who
@@ -11,7 +11,7 @@
 
 .EXAMPLE
     .\publish.ps1
-    # out\Agmen\Agmen.exe and out\Agmen-win-x64.zip
+    # out\Agmen\Agmen.exe, out\Agmen-win-x64.zip and out\Agmen-Setup-x64.exe
 
 .EXAMPLE
     .\publish.ps1 -OutDir C:\Temp\agmen-build -NoZip
@@ -21,7 +21,9 @@ param(
     # Where the build goes: <OutDir>\Agmen and <OutDir>\Agmen-win-x64.zip. Default: out, beside this script.
     [string]$OutDir,
     # Build the folder only.
-    [switch]$NoZip
+    [switch]$NoZip,
+    # Use an existing Inno Setup 6 compiler. By default the installer build uses a verified portable compiler.
+    [string]$CompilerPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,7 +35,19 @@ $OutDir = [IO.Path]::GetFullPath($OutDir)
 $app = Join-Path $OutDir 'Agmen'
 $zip = Join-Path $OutDir 'Agmen-win-x64.zip'
 
-if (Test-Path $app) { Remove-Item -LiteralPath $app -Recurse -Force }
+if (Test-Path -LiteralPath $app) {
+    $previous = Get-Item -LiteralPath $app
+    $projectRoot = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
+    if (-not $previous.PSIsContainer -or ($previous.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $previous.FullName -ieq $projectRoot -or $projectRoot.StartsWith($previous.FullName.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Invalid publish destination: $($previous.FullName)"
+    }
+    if (@(Get-ChildItem -LiteralPath $previous.FullName -Force).Count -gt 0 -and
+        -not (Test-Path -LiteralPath (Join-Path $previous.FullName 'Agmen.exe') -PathType Leaf)) {
+        throw "The output folder already contains files and does not look like an Agmen build: $($previous.FullName)"
+    }
+    Remove-Item -LiteralPath $previous.FullName -Recurse -Force
+}
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
 Write-Step 'Publishing'
@@ -89,3 +103,6 @@ $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant
 [IO.File]::WriteAllText("$zip.sha256", "$hash  Agmen-win-x64.zip`n")
 Write-Host "$zip ($([math]::Round((Get-Item $zip).Length / 1MB)) MB)" -ForegroundColor Green
 Write-Host "SHA-256 $hash"
+
+Write-Step 'Building the Windows installer'
+& (Join-Path $PSScriptRoot 'installer\build.ps1') -AppDir $app -OutDir $OutDir -CompilerPath $CompilerPath

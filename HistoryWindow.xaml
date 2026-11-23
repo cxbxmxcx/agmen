@@ -7,7 +7,7 @@
     <DockPanel Margin="18,16,18,14">
         <StackPanel DockPanel.Dock="Top">
             <TextBlock Text="Session history" FontSize="16" FontWeight="SemiBold" Foreground="{StaticResource TextPrimary}"/>
-            <TextBlock Margin="0,6,0,12" FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"
+            <TextBlock x:Name="HistoryDescription" Margin="0,6,0,12" FontSize="12" TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"
                        Text="Sessions you closed in Agmen, and every agent's sessions from the past week, including ones started elsewhere. Reopen one to continue its conversation in a tab."/>
             <DockPanel Margin="0,0,0,10">
                 <TextBlock Text="Find" VerticalAlignment="Center" Margin="0,0,10,0" FontSize="12"

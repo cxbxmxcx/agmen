@@ -24,7 +24,7 @@
     <Description>A Windows workspace that runs Claude Code, Codex, Kimi Code and Antigravity sessions as a tree of tabs.</Description>
     <RepositoryUrl>https://github.com/cxbxmxcx/agmen</RepositoryUrl>
     <!-- publish.ps1 builds into out\, inside this folder; keep its generated code out of the next build. -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);out/**;publish/**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);out/**;publish/**;Tests/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -35,6 +35,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Agmen.Tests" />
     <!-- WPF wrapper around the Windows Terminal control plus Microsoft's ConPTY package, MIT licensed. -->
     <PackageReference Include="EasyWindowsTerminalControl" Version="1.0.38" />
   </ItemGroup>

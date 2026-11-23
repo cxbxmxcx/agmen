@@ -67,6 +67,7 @@ public sealed class HostedTab : INotifyPropertyChanged
         Id = id ?? Guid.NewGuid();
         Cwd = cwd;
         SessionId = sessionId;
+        ResumeId = sessionId;
         KnownTitle = knownTitle;
         _category = category;
         IsPrimary = isPrimary;
@@ -76,6 +77,39 @@ public sealed class HostedTab : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public Guid Id { get; }
+    /// <summary>The immutable inherited history available to this tab through read_handoff.</summary>
+    public Guid? HandoffId { get; set; }
+    internal string? ResumeId { get; private set; }
+    internal string? ConfirmedTranscript { get; set; }
+    internal bool HasConversationInput { get; private set; }
+
+    internal void BindConfirmedSession(AgentSessionState? state)
+    {
+        if (state?.StartedAt != StartedAt || state.Agent != Agent || state.SessionId is not { Length: > 0 } id) return;
+        if (!RegisterNativeSession(id)) return;
+        if (id != SessionId) ConfirmedTranscript = null;
+        SessionId = id;
+        if (state.Transcript != null) ConfirmedTranscript = state.Transcript;
+    }
+
+    private string? _registeredId;
+
+    private bool RegisterNativeSession(string id)
+    {
+        if (string.Equals(_registeredId, id, StringComparison.OrdinalIgnoreCase)) return true;
+        try
+        {
+            WorkspaceSessions.Current.Claim(Agent, id);
+            _registeredId = id;
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            StateNote = ex.Message;
+            return false;
+        }
+    }
+    internal long ActivityVersion { get; private set; }
     public string Cwd { get; }
     /// <summary>The agent CLI this tab runs.</summary>
     public AgentKind Agent { get; }
@@ -128,9 +162,24 @@ public sealed class HostedTab : INotifyPropertyChanged
     {
         Stop();
         LoginEnvironment.Apply();   // the child inherits our environment, so refresh it from the registry
+        if (SessionId is null && HandoffId.HasValue && !HasQueuedKey("handoff")) InitialPrompt ??= WorkspaceWindow.HandoffPrompt();
         bool withPrompt;
         var commandLine = Agent == AgentKind.Claude ? ClaudeCommand(out withPrompt) : OtherAgentCommand(out withPrompt);
         if (commandLine is null) return null;
+        if (SessionId is { Length: > 0 } id && !RegisterNativeSession(id))
+        {
+            MarkEnded(StateNote);
+            return null;
+        }
+        return StartTerminal(commandLine, withPrompt);
+    }
+
+    internal EasyTerminalControl StartTerminal(string commandLine, bool withPrompt = false)
+    {
+        ResumeId = SessionId;
+        HasConversationInput = withPrompt;
+        ConfirmedTranscript = null;
+        ActivityVersion++;
 
         var ctl = new EasyTerminalControl
         {
@@ -211,6 +260,7 @@ public sealed class HostedTab : INotifyPropertyChanged
         {
             Log.Write($"tab {ShortId}: {SessionId} has no saved conversation yet, starting a new session instead");
             SessionId = null;
+            if (HandoffId.HasValue) InitialPrompt ??= WorkspaceWindow.HandoffPrompt();
         }
 
         var cmd = new System.Text.StringBuilder(Quote(claude));
@@ -247,6 +297,7 @@ public sealed class HostedTab : INotifyPropertyChanged
                     return null;
                 }
                 cmd.Append(Quote(entry.Node)).Append(' ').Append(QuoteArg(entry.Script));
+                if (AgentProfiles.SupportsLocalCodex(entry)) cmd.Append(" --no-daemon");
                 if (SessionId is not null) cmd.Append(" resume");
                 // Like a Claude Code primary, a Codex one gets Agmen's tools and not the user's other
                 // MCP servers: it directs sessions and does no work of its own.
@@ -277,7 +328,8 @@ public sealed class HostedTab : INotifyPropertyChanged
                 else if (AgentConnect.AgentFor(AgentKind.Kimi) is { } kimiAgent) cmd.Append(" --agent ").Append(kimiAgent);
                 foreach (var arg in AgentSettings.KimiArgs(Launch)) cmd.Append(' ').Append(QuoteArg(arg));
                 // Kimi has no flag for a first message, so it waits in the queue until Kimi is ready for it.
-                if (prompt is not null) Enqueue(new OutboxMessage { Text = prompt, Origin = "parent", ReportTo = ReportFirstPromptTo });
+                if (prompt is not null) Enqueue(new OutboxMessage { Text = prompt, Origin = "parent",
+                    ReportTo = ReportFirstPromptTo, Key = HandoffId.HasValue ? "handoff" : null });
                 // Nor for its effort: that comes only from the environment, which this tab's process
                 // can get only through cmd. Every part of the command line here is free of cmd's
                 // special characters: paths, ids, and model names the settings checked.
@@ -356,24 +408,38 @@ public sealed class HostedTab : INotifyPropertyChanged
     /// Kill the session's process for a restart and wait, up to a limit, until it has exited, so
     /// its conversation is never open in two processes at once.
     /// </summary>
-    public async Task StopForRestartAsync(TimeSpan limit)
+    public async Task<bool> StopForRestartAsync(TimeSpan limit)
     {
+        if (_restarting) return false;
+        var process = Terminal?.ConPTYTerm?.Process;
+        if (process is null && State == TabState.Starting) return false;
         _restarting = true;
-        int pid = Pid;
         Stop();
-        if (pid <= 0) return;
+        if (process is null) return true;
         var until = DateTime.UtcNow + limit;
-        while (DateTime.UtcNow < until)
+        do
         {
             try
             {
-                using var process = System.Diagnostics.Process.GetProcessById(pid);
-                if (process.HasExited) return;
+                if (process.HasExited) return true;
             }
-            catch (Exception) { return; }   // already gone
+            catch (InvalidOperationException) { break; }
             await Task.Delay(100);
-        }
-        Log.Write($"tab {ShortId}: process {pid} still running after {limit.TotalSeconds:0} s; restarting anyway");
+        } while (DateTime.UtcNow < until);
+        _restarting = false;
+        Log.Write($"tab {ShortId}: couldn't confirm that its process stopped");
+        return false;
+    }
+
+    internal string? SwapBlockReason()
+    {
+        if (_restarting || State is TabState.Starting or TabState.Pending) return "The session is starting or restarting.";
+        if (IsBusy || IsWaiting) return "Wait for the current turn or answer the pending prompt first.";
+        if (_userDraft) return "Send or clear your draft first.";
+        if (HasQueued || _turnReport is not null || _inFlightStarted
+            || _deliveredAt is { } at && DateTime.Now - at < TimeSpan.FromSeconds(20))
+            return "Finish or discard the pending messages first.";
+        return null;
     }
 
     /// <summary>Show the tab as ended without starting it, e.g. restored after the user exited Claude.</summary>
@@ -408,6 +474,7 @@ public sealed class HostedTab : INotifyPropertyChanged
                 try { code = wp.Process.ExitCode; } catch (Exception) { /* exit code unavailable */ }
                 if (_inFlight is not null) _turnReport = (_inFlight, "ended");
                 _inFlight = null;
+                _inFlightStarted = false;
                 _deliveredAt = null;
                 State = TabState.Ended;
                 StateNote = code is null or 0 ? "session ended" : $"session ended (exit code {code})";
@@ -428,12 +495,14 @@ public sealed class HostedTab : INotifyPropertyChanged
     /// </summary>
     public string? UpdateFrom(SessionInfo info)
     {
+        if (info.SessionId.Length > 0 && !RegisterNativeSession(info.SessionId)) return null;
         if (Session is null) Session = new SessionViewModel(info);
         else Session.Update(info);
         if (!string.IsNullOrEmpty(info.SessionId)) SessionId = info.SessionId;
         if (!string.IsNullOrEmpty(info.Name)) KnownTitle = info.Name;
 
         var status = info.EffectiveStatus;
+        if (status != _lastStatus) ActivityVersion++;
         string? alert = null;
         if (status == "busy" && _lastStatus != "busy")
         {
@@ -613,6 +682,7 @@ public sealed class HostedTab : INotifyPropertyChanged
     /// <summary>Queue a message for this session's prompt. A keyed message replaces an older one with the same key.</summary>
     public void Enqueue(OutboxMessage message)
     {
+        ActivityVersion++;
         if (message.Key is not null) _outbox.RemoveAll(m => m.Key == message.Key);
         _outbox.Add(message);
         RaiseQueue();
@@ -621,6 +691,7 @@ public sealed class HostedTab : INotifyPropertyChanged
     public int ClearQueue()
     {
         int n = _outbox.Count;
+        if (n > 0) ActivityVersion++;
         _outbox.Clear();
         RaiseQueue();
         return n;
@@ -651,6 +722,7 @@ public sealed class HostedTab : INotifyPropertyChanged
     /// </summary>
     public bool TryDeliver(bool force = false)
     {
+        if (_outbox.RemoveAll(m => m.CanDeliver?.Invoke() == false) > 0) RaiseQueue();
         if (_outbox.Count == 0 || State != TabState.Running || Terminal is not { } ctl) return false;
         var now = DateTime.Now;
         if (_deliveredAt is { } at)
@@ -667,12 +739,13 @@ public sealed class HostedTab : INotifyPropertyChanged
         if (!IsTrustedFolder()) return false;
 
         _outbox.RemoveAt(0);
+        ActivityVersion++;
         _deliveredAt = now;
         _deliveredOrigin = next.Origin;
         _inFlight = next.ReportBack ? next : null;
         _inFlightStarted = false;
         _lastDelivered = next;
-        TypeMessage(ctl, next.Text);
+        TypeMessage(ctl, next);
         Log.Write($"tab {ShortId}: delivered a message from {next.Origin} ({next.Text.Length} chars)");
         RaiseQueue();
         return true;
@@ -696,8 +769,11 @@ public sealed class HostedTab : INotifyPropertyChanged
     /// The user pressed a key that reached this terminal. Anything but Enter and the modifiers
     /// may leave text in Claude's prompt; Ctrl+C clears it.
     /// </summary>
-    public void NoteUserKey(bool clearsInput)
+    public void NoteUserKey(bool clearsInput, bool submitted = false)
     {
+        _userInputVersion++;
+        ActivityVersion++;
+        if (submitted && _userDraft) HasConversationInput = true;
         bool before = _userDraft;
         _userDraft = !clearsInput;
         if (before != _userDraft) RaiseQueue();
@@ -749,20 +825,38 @@ public sealed class HostedTab : INotifyPropertyChanged
 
     /// <summary>
     /// Paste the text, so its line breaks stay inside the message, then press Enter on its
-    /// own a moment later, once Claude has taken the paste in.
+    /// own a moment later, once the agent has taken the paste in.
     /// </summary>
-    private async void TypeMessage(EasyTerminalControl ctl, string text)
+    private async void TypeMessage(EasyTerminalControl ctl, OutboxMessage message)
     {
         try
         {
-            text = text.Replace("\r\n", "\n").Trim();
+            var text = PlainMessage(message.Text);
             var term = ctl.ConPTYTerm;
+            var inputVersion = _userInputVersion;
             term.WriteToTerm(_bracketedPaste ? "\x1b[200~" + text.Replace('\n', '\r') + "\x1b[201~" : text.Replace('\n', ' '));
             await Task.Delay(500);
-            if (Terminal == ctl && State == TabState.Running) term.WriteToTerm("\r");
+            if (Terminal != ctl || State != TabState.Running) return;
+            if (inputVersion == _userInputVersion && AtRest(_lastStatus) && message.CanDeliver?.Invoke() != false)
+            {
+                term.WriteToTerm("\r");
+                HasConversationInput = true;
+            }
+            else
+            {
+                _deliveredAt = null;
+                _inFlight = null;
+                _userDraft = true;
+                RaiseQueue();
+            }
         }
         catch (Exception ex) { Log.Write($"tab {ShortId}: typing a message failed: {ex.Message}"); }
     }
+
+    private long _userInputVersion;
+
+    internal static string PlainMessage(string text) => new string(text.ReplaceLineEndings("\n").Replace("\t", "    ")
+        .Where(c => c == '\n' || !char.IsControl(c)).ToArray()).Trim();
 
     private void RaiseQueue()
     {
@@ -848,14 +942,14 @@ public sealed class HostedTab : INotifyPropertyChanged
     {
         get
         {
-            if (Pid > 0) return Pid;
-            try { return Terminal?.ConPTYTerm?.Process is ProcessFactory.WrappedProcess wp ? wp.Pid : 0; }
+            if (State is not (TabState.Running or TabState.Starting) || _restarting) return 0;
+            try { return Terminal?.ConPTYTerm?.Process is ProcessFactory.WrappedProcess { HasExited: false } wp ? wp.Pid : 0; }
             catch (Exception) { return 0; }
         }
     }
 
     /// <summary>This tab as the agent monitor sees it.</summary>
-    public AgentTabRef AgentRef() => new(Id, Agent, Cwd, CurrentPid, _startedAt, SessionId);
+    public AgentTabRef AgentRef() => new(Id, Agent, Cwd, CurrentPid, _startedAt, ResumeId);
 
     // ------------------------------------------------------------ place in the tree
 
@@ -863,6 +957,8 @@ public sealed class HostedTab : INotifyPropertyChanged
     private int _depth, _childCount;
     private bool _collapsed, _hiddenByCollapse;
     private string? _parentTitle;
+    /// <summary>Changes every time this tab moves, including when it moves back under an earlier parent.</summary>
+    internal long ParentVersion { get; private set; }
 
     /// <summary>The session that started this one, or that the user put it under; null at the top level.</summary>
     public Guid? ParentId
@@ -872,6 +968,7 @@ public sealed class HostedTab : INotifyPropertyChanged
         {
             if (_parentId == value) return;
             _parentId = value;
+            ParentVersion++;
             Raise();
         }
     }

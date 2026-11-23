@@ -1,5 +1,7 @@
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Agmen.Services;
@@ -20,18 +22,19 @@ public sealed class ControlServer : IDisposable
 
     public void Start()
     {
-        _ = Task.Run(AcceptLoopAsync);
+        _ = Task.Run(() => AcceptLoopAsync(ControlChannel.PipeName));
+        _ = Task.Run(() => AcceptLoopAsync(ControlChannel.HostPipe(Environment.ProcessId)));
         Log.Write($"control: listening on pipe {ControlChannel.PipeName}");
     }
 
-    private async Task AcceptLoopAsync()
+    private async Task AcceptLoopAsync(string name)
     {
         while (!_stop.IsCancellationRequested)
         {
             NamedPipeServerStream? pipe = null;
             try
             {
-                pipe = new NamedPipeServerStream(ControlChannel.PipeName, PipeDirection.InOut,
+                pipe = new NamedPipeServerStream(name, PipeDirection.InOut,
                     NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
                 await pipe.WaitForConnectionAsync(_stop.Token);
@@ -71,10 +74,21 @@ public sealed class ControlServer : IDisposable
                     var request = JsonNode.Parse(line) as JsonObject ?? throw new JsonException("not a JSON object");
                     var tool = request["tool"] is JsonValue v && v.TryGetValue<string>(out var name) ? name : "";
                     var args = request["args"] as JsonObject ?? new JsonObject();
-                    var caller = (request["caller"] as JsonArray)?
-                        .Select(n => n is JsonValue p && p.TryGetValue<int>(out var pid) ? pid : 0)
-                        .Where(pid => pid > 0).ToList() ?? new List<int>();
+                    if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var peer) || peer == 0 || peer > int.MaxValue)
+                        throw new IOException("Could not identify the connected process.");
+                    var chain = ProcessTree.Ancestry((int)peer);
+                    if (peer != Environment.ProcessId && ControlChannel.NearestHost(chain) is { } nearest && nearest != Environment.ProcessId)
+                        throw new IOException("The connected process belongs to another Agmen workspace.");
+                    var caller = peer == Environment.ProcessId ? new[] { (int)peer }
+                        : chain.TakeWhile(n => n.Pid != Environment.ProcessId).Select(n => n.Pid).ToArray();
                     response = await _handle(tool, args, caller);
+                    if (ProbeLog.Enabled && tool == "agmen:hook" && (bool?)response["ok"] == true)
+                        ProbeLog.Write(new JsonObject { ["kind"] = "hook", ["agent"] = args["agent"]?.DeepClone(),
+                            ["event"] = args["event"]?.DeepClone(), ["payload"] = args["payload"]?.DeepClone(),
+                            ["ancestry"] = string.Join(" <- ", chain.Select(n => $"{n.Pid} {n.Name}")) });
+                    if (ProbeLog.Enabled && tool == "agmen:role")
+                        ProbeLog.Write(new JsonObject { ["kind"] = "mcp-initialize", ["client"] = args["client"]?.DeepClone(),
+                            ["role"] = response["role"]?.DeepClone(), ["ancestry"] = string.Join(" <- ", chain.Select(n => $"{n.Pid} {n.Name}")) });
                 }
                 catch (Exception ex)
                 {
@@ -90,4 +104,7 @@ public sealed class ControlServer : IDisposable
     }
 
     public void Dispose() => _stop.Cancel();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint clientProcessId);
 }

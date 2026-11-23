@@ -35,8 +35,10 @@ public partial class ConnectWindow : Window
             _ => Amber,
         };
         public string ConnectText => State == AgentConnect.State.ConnectedElsewhere ? "Connect here" : "Connect";
-        public bool CanConnect => State is AgentConnect.State.NotConnected or AgentConnect.State.ConnectedElsewhere;
-        public bool CanDisconnect => State is AgentConnect.State.Connected or AgentConnect.State.ConnectedElsewhere;
+        public bool CanConnect => State is AgentConnect.State.NotConnected or AgentConnect.State.ConnectedElsewhere
+            or AgentConnect.State.Incomplete;
+        public bool CanDisconnect => State is AgentConnect.State.Connected or AgentConnect.State.ConnectedElsewhere
+            or AgentConnect.State.RegistrationRemaining or AgentConnect.State.Incomplete;
         public string Preview => AgentConnect.Preview(Agent);
 
         public void Refresh()

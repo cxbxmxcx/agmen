@@ -13,13 +13,17 @@ public static class McpTools
     public const string PrimaryInstructions =
         "You are the primary session in Agmen, the user's Windows workspace, at the top of their session tree. " +
         "spawn_child starts child sessions under you, of any agent: Claude Code, Codex, Kimi Code or Antigravity. " +
+        "Set inherit_context to give a new child a snapshot of your recorded conversation. " +
+        "If you switched agents in this tab, read_handoff gives you the history brought over from the previous agent. " +
         "message_child, read_child and list_children direct and follow them; you direct only your own children. " +
         "list_sessions and read_session give you a read-only view of every session.";
 
     public const string TabInstructions =
         "Agmen runs this session in a tab of the user's session tree. spawn_child starts child sessions under you, of " +
         "any agent; message_child, read_child and list_children direct and follow them. message_parent reports to the " +
-        "session that started you. whoami shows your name, your parent and your children.";
+        "session that started you. Set inherit_context on spawn_child to give it a snapshot of your recorded conversation. " +
+        "read_handoff pages through the snapshot you received when forking or switching agents. Children of the same top-level tab can " +
+        "use list_siblings and message_sibling to share a chosen message or excerpt. whoami shows your place in the tree.";
 
     public const string OutsideInstructions =
         "This session isn't running inside Agmen, so Agmen's tools aren't available here.";
@@ -61,10 +65,44 @@ public static class McpTools
             "name": { "type": "string", "description": "A short name such as api-tests: letters, digits, dots, dashes and underscores. Default: the agent and a number, such as codex-1." },
             "folder": { "type": "string", "description": "The folder to work in. Default: your own folder. list_projects finds local projects." },
             "resume_session_id": { "type": "string", "description": "Resume an earlier conversation of the chosen agent as your child, instead of starting a new one." },
+            "inherit_context": { "type": "boolean", "default": false, "description": "Give a fresh child a frozen copy of your recorded conversation, including any history you inherited. The child gets a short handoff and can page through the copy with read_handoff. Choose this option only when the child needs that history. Use it without resume_session_id." },
             "color": { "type": "string", "enum": COLORS, "description": "Color code for its card: bug (red), planning (blue), execution (yellow), ready (green)." },
             "model": { "type": "string", "description": "A model for the child, such as opus or sonnet for Claude Code, gpt-6.1-sol for Codex, kimi-code/k3.1-pro for Kimi Code, or gemini-4-argon-high for Antigravity. Default: the user's setting for that agent." },
             "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"], "description": "Reasoning effort for the child; ultra is Codex only. Default: the user's setting for that agent." }
           }
+        }
+      },
+      {
+        "name": "read_handoff",
+        "title": "Read your inherited conversation",
+        "description": "Read a page of the conversation snapshot your tab received when forking or switching agents. Pages use UTF-16 character offsets. Start at zero and use next_offset from each result until end is true.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Character offset in your snapshot." },
+            "count": { "type": "integer", "minimum": 1, "maximum": 16384, "default": 8192, "description": "Characters to read." }
+          }
+        },
+        "annotations": { "readOnlyHint": true }
+      },
+      {
+        "name": "list_siblings",
+        "title": "List your siblings",
+        "description": "List the tab ID, name, agent and status of other direct children of your top-level parent. Use a listed tab ID to select a recipient.",
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        "annotations": { "readOnlyHint": true }
+      },
+      {
+        "name": "message_sibling",
+        "title": "Share a message with one sibling",
+        "description": "Send a message or selected excerpt to one sibling from list_siblings. Supply the text you want that sibling to receive. Agmen labels it with your name and queues it until the recipient can accept it.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "sibling": { "type": "string", "description": "One exact tab ID or unique full name from list_siblings." },
+            "message": { "type": "string", "minLength": 1, "description": "The text or selected excerpt to share." }
+          },
+          "required": ["sibling", "message"]
         }
       },
       {

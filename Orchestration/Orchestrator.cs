@@ -26,10 +26,12 @@ public sealed class Orchestrator
 
     private static readonly HashSet<string> PrimaryOnly = Mcp.McpTools.PrimaryOnly;
 
-    private static readonly Regex MessagePrefix = new(@"^\[From your (parent|child), [^\]]*\]\s*", RegexOptions.Compiled);
+    private static readonly Regex MessagePrefix = new(@"^\[From your (parent|child|sibling), [^\]]*\]\s*", RegexOptions.Compiled);
 
     private readonly WorkspaceWindow _ws;
     private readonly Dictionary<Guid, List<DateTime>> _starts = new();
+    // Snapshot capture yields the UI thread. Reserve the name and slot until the child is attached.
+    private readonly Dictionary<string, Guid> _pendingForks = new(StringComparer.OrdinalIgnoreCase);
 
     public Orchestrator(WorkspaceWindow ws) => _ws = ws;
 
@@ -48,13 +50,18 @@ public sealed class Orchestrator
         try
         {
             var from = await OnUi(() => CallerTab(caller)) ?? throw new ToolError("This session doesn't run in an Agmen tab.");
+            HostedTab ActiveCaller() => !from.IsEnded && CallerTab(caller) == from ? from
+                : throw new ToolError("The calling session has ended or restarted.");
             who = from.Title;
             if (PrimaryOnly.Contains(tool) && !from.IsPrimary) throw new ToolError($"'{tool}' is only for the primary session.");
             string text = tool switch
             {
                 "whoami" => await OnUi(() => WhoAmI(from)),
                 "list_children" => await OnUi(() => ListChildren(from)),
-                "spawn_child" => await OnUi(() => SpawnChild(from, args)),
+                "spawn_child" => await OnUi(() => SpawnChildAsync(ActiveCaller(), args)).Unwrap(),
+                "list_siblings" => await OnUi(() => ListSiblings(ActiveCaller(), args)),
+                "message_sibling" => await OnUi(() => MessageSibling(ActiveCaller(), args)),
+                "read_handoff" => await ReadHandoffAsync(await OnUi(() => ActiveCaller().HandoffId), args),
                 "message_child" => await OnUi(() => MessageChild(from, args)),
                 "read_child" => await ReadAsync(() => Target.Of(ResolveChild(from, Str(args, "child"))), args),
                 "message_parent" => await OnUi(() => MessageParent(from, args)),
@@ -98,13 +105,14 @@ public sealed class Orchestrator
         return result;
     }
 
-    private sealed class ToolError(string message) : Exception(message);
+    internal sealed class ToolError(string message) : Exception(message);
 
     // ------------------------------------------------------------ who is calling
 
     /// <summary>The tab whose process is in the caller's chain: the tool server or hook runs below the agent it serves.</summary>
     private HostedTab? CallerTab(IReadOnlyList<int> caller)
     {
+        _ws.ActivateStartingCaller(caller);
         foreach (var pid in caller)
             if (_ws.Tabs.FirstOrDefault(t => t.CurrentPid == pid && pid > 0) is { } tab) return tab;
         return null;
@@ -129,7 +137,10 @@ public sealed class Orchestrator
             Log.Write($"hook: {Str(args, "agent")} {evt} from no Agmen tab");
             return new JsonObject { ["ok"] = false, ["text"] = "No Agmen tab runs this session." };
         }
+        var previousId = tab.SessionId;
         _ws.Agents.OnHook(tab.AgentRef(), evt, args["payload"] as JsonObject);
+        tab.BindConfirmedSession(_ws.Agents.StateOf(tab.Id));
+        if (tab.SessionId != previousId) _ws.RequestSave();
         return new JsonObject { ["ok"] = true, ["text"] = "noted" };
     }
 
@@ -140,6 +151,7 @@ public sealed class Orchestrator
         var sb = new StringBuilder();
         sb.Append($"You are {NameOf(tab)}, {AgentProfiles.WithArticle(tab.Agent)} session in an Agmen tab, working in {tab.Cwd}. ");
         if (tab.IsPrimary) sb.Append("You are the primary session, at the top of the user's session tree. ");
+        if (tab.HandoffId.HasValue) sb.Append("Your inherited conversation is available through read_handoff. ");
         sb.AppendLine(_ws.ParentOf(tab) is { } parent
             ? $"Your parent is {NameOf(parent)}, {AgentProfiles.WithArticle(parent.Agent)} session; report to it with message_parent."
             : "You have no parent session: you work for the user directly.");
@@ -159,9 +171,120 @@ public sealed class Orchestrator
                + $"and read what it has done with read_child.\n[\n{string.Join(",\n", lines)}\n]";
     }
 
-    private string SpawnChild(HostedTab parent, JsonObject args)
+    internal static IEnumerable<HostedTab> SiblingsOf(IReadOnlyList<HostedTab> tabs, HostedTab sender)
     {
-        if (parent.IsEnded) throw new ToolError("Your own session has ended.");
+        if (!tabs.Contains(sender) || sender.ParentId is not { } parentId
+            || !tabs.Any(t => t.Id == parentId && t.ParentId is null))
+            return [];
+        return tabs.Where(t => t != sender && t.ParentId == parentId);
+    }
+
+    internal static Func<bool> WatchSiblingRelationship(IReadOnlyList<HostedTab> tabs, HostedTab sender, HostedTab recipient)
+    {
+        var parent = tabs.FirstOrDefault(t => t.Id == sender.ParentId && t.ParentId is null);
+        if (parent is null || sender == recipient || recipient.ParentId != parent.Id) return () => false;
+        var parentState = (parent.StartedAt, parent.ParentVersion);
+        var senderState = (sender.StartedAt, sender.ParentVersion);
+        var recipientState = (recipient.StartedAt, recipient.ParentVersion);
+        return () => !sender.IsEnded && !recipient.IsEnded && tabs.Contains(parent) && tabs.Contains(sender) && tabs.Contains(recipient)
+            && (parent.StartedAt, parent.ParentVersion) == parentState && (sender.StartedAt, sender.ParentVersion) == senderState
+            && (recipient.StartedAt, recipient.ParentVersion) == recipientState;
+    }
+
+    internal static Func<bool> WatchParentRelationship(IReadOnlyList<HostedTab> tabs, HostedTab parent, HostedTab child)
+    {
+        var version = child.ParentVersion;
+        return () => tabs.Contains(parent) && tabs.Contains(child) && child.ParentId == parent.Id && child.ParentVersion == version;
+    }
+
+    private string ListSiblings(HostedTab from, JsonObject args)
+    {
+        if (args.Count != 0) throw new ToolError("list_siblings takes no arguments.");
+        var peers = SiblingsOf(_ws.Tabs, from).Select(t => (JsonNode)new JsonObject
+        {
+            ["id"] = t.Id.ToString(),
+            ["name"] = NameOf(t),
+            ["agent"] = AgentProfiles.Id(t.Agent),
+            ["status"] = StatusOf(Target.Of(t)),
+        }).ToArray();
+        return new JsonArray(peers).ToJsonString(ControlChannel.Json);
+    }
+
+    internal static (HostedTab Recipient, OutboxMessage Message) PrepareSiblingMessage(
+        IReadOnlyList<HostedTab> tabs, HostedTab sender, string? query, string? text)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            throw new ToolError("Choose one sibling by tab ID or full name from list_siblings.");
+        if (string.IsNullOrWhiteSpace(text))
+            throw new ToolError("Provide the message or selected excerpt to share.");
+        if (text.Any(c => char.IsControl(c) && c is not ('\t' or '\r' or '\n')))
+            throw new ToolError("Share plain text without terminal control characters.");
+
+        query = query.Trim();
+        var siblings = SiblingsOf(tabs, sender).ToList();
+        var recipient = siblings.FirstOrDefault(t => Same(t.Id.ToString(), query));
+        if (recipient is null)
+        {
+            var matches = siblings.Where(t => Same(NameOf(t), query)).ToList();
+            if (matches.Count != 1) throw new ToolError("Choose a unique sibling from list_siblings using its tab ID.");
+            recipient = matches[0];
+        }
+        if (sender.IsEnded || recipient.IsEnded) throw new ToolError("Both sibling sessions must be open and active.");
+
+        var label = new string(NameOf(sender).Where(c => !char.IsControl(c) && c != ']').ToArray());
+        return (recipient, new OutboxMessage
+        {
+            Text = $"[From your sibling, {label}] " + text.Replace("\r\n", "\n").Replace('\r', '\n'),
+            Origin = "sibling",
+            CanDeliver = WatchSiblingRelationship(tabs, sender, recipient),
+        });
+    }
+
+    private string MessageSibling(HostedTab sender, JsonObject args)
+    {
+        if (args.Any(p => p.Key is not ("sibling" or "message")))
+            throw new ToolError("message_sibling takes only sibling and message.");
+        static string? Input(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
+        return QueueSiblingMessage(sender, Input(args["sibling"]), Input(args["message"]));
+    }
+
+    internal string QueueSiblingMessage(HostedTab sender, string? address, string? text)
+    {
+        var (recipient, message) = PrepareSiblingMessage(_ws.Tabs, sender, address, text);
+        if (recipient.QueuedCount >= MaxQueued) throw new ToolError($"The queue for {NameOf(recipient)} is full.");
+        recipient.Enqueue(message);
+        recipient.TryDeliver();
+        return recipient.HasQueued ? $"Queued for {NameOf(recipient)}. {recipient.HoldReason}."
+            : $"Sent to {NameOf(recipient)}.";
+    }
+
+    private static Task<string> ReadHandoffAsync(Guid? handoffId, JsonObject args)
+    {
+        if (args.Any(p => p.Key is not ("offset" or "count"))) throw new ToolError("read_handoff takes only offset and count.");
+        int PageArgument(string name, int fallback, int min, int max)
+        {
+            if (!args.ContainsKey(name)) return fallback;
+            if (args[name] is JsonValue v && v.TryGetValue<int>(out var number) && number >= min && number <= max)
+                return number;
+            throw new ToolError($"{name} must be an integer between {min} and {max}.");
+        }
+        int offset = PageArgument("offset", 0, 0, int.MaxValue);
+        int count = PageArgument("count", 8192, 1, 16384);
+        return Task.Run(() => ConversationHistory.Read(handoffId, offset, count));
+    }
+
+    private async Task<string> SpawnChildAsync(HostedTab parent, JsonObject args)
+    {
+        var resume = Str(args, "resume_session_id")?.Trim();
+        if (string.IsNullOrEmpty(resume)) resume = null;
+        bool inherit = args.ContainsKey("inherit_context")
+            ? Bool(args, "inherit_context") ?? throw new ToolError("inherit_context must be true or false.")
+            : false;
+        if (inherit && resume is not null)
+            throw new ToolError("A contextual fork starts a new conversation. Choose either inherit_context or resume_session_id.");
+        TabCategory? color = args.ContainsKey("color")
+            ? ParseColor(Str(args, "color") ?? throw new ToolError("Give a color code for the child's card."))
+            : null;
         var agent = Str(args, "agent") is { Length: > 0 } agentText
             ? AgentProfiles.Parse(agentText) ?? throw new ToolError($"'{agentText}' isn't an agent Agmen runs. Use claude, codex, kimi or antigravity.")
             : parent.Agent;
@@ -171,25 +294,27 @@ public sealed class Orchestrator
         // theirs couldn't report back, and Antigravity's tab couldn't even follow its turns.
         if (AgentConnect.Connectable.Contains(agent) && AgentConnect.StateOf(agent) != AgentConnect.State.Connected)
         {
-            _ws.Dispatcher.BeginInvoke(() => _ws.OfferConnect(agent));
+            _ = _ws.Dispatcher.BeginInvoke(() => _ws.OfferConnect(agent));
             throw new ToolError($"{AgentProfiles.DisplayName(agent)} isn't connected to Agmen yet, so a child of that agent couldn't use "
                                 + "Agmen's tools or report to you. Agmen has asked the user to connect it; they can also use Connect "
                                 + "agents… in Agmen's + menu. Tell the user, and start the child again once they have.");
         }
         if (_ws.DepthOf(parent) >= WorkspaceWindow.MaxDepth)
             throw new ToolError($"The session tree may go only {WorkspaceWindow.MaxDepth} levels deep, so you can't start children. Do the work yourself, or tell your parent.");
-        if (_ws.ChildrenOf(parent).Count(c => !c.IsEnded) >= WorkspaceWindow.MaxChildren)
+        int pending = _pendingForks.Values.Count(id => id == parent.Id);
+        if (_ws.ChildrenOf(parent).Count(c => !c.IsEnded) + pending >= WorkspaceWindow.MaxChildren)
             throw new ToolError($"You already have {WorkspaceWindow.MaxChildren} running children. Wait for one to finish, or ask the user to close one.");
         var starts = _starts.TryGetValue(parent.Id, out var list) ? list : _starts[parent.Id] = new List<DateTime>();
         starts.RemoveAll(at => DateTime.UtcNow - at > TimeSpan.FromHours(1));
-        if (starts.Count >= StartsPerHour)
+        if (starts.Count + pending >= StartsPerHour)
             throw new ToolError($"You've started {StartsPerHour} children in the last hour. Check with the user before starting more.");
 
         var asked = Str(args, "name")?.Trim();
         if (!string.IsNullOrEmpty(asked) && !Regex.IsMatch(asked, @"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$"))
             throw new ToolError("A session name may use letters, digits, dots, dashes and underscores, up to 48 characters.");
         // A name already in use gets the next free variant rather than costing the parent another call.
-        var name = string.IsNullOrEmpty(asked) ? _ws.UniqueName(agent) : _ws.FreeName(asked);
+        var reserved = _pendingForks.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var name = string.IsNullOrEmpty(asked) ? _ws.UniqueName(agent, reserved) : _ws.FreeName(asked, reserved);
         var renamed = string.IsNullOrEmpty(asked) || name == asked ? "" : $" Another session was already called {asked}, so this one is {name}.";
 
         // A model and effort of the child's own; its permissions are always the user's setting.
@@ -202,8 +327,6 @@ public sealed class Orchestrator
         else if (!AgentSettings.Efforts(agent).Contains(effort))
             throw new ToolError($"{AgentProfiles.DisplayName(agent)} takes these efforts: {string.Join(", ", AgentSettings.Efforts(agent))}.");
 
-        var resume = Str(args, "resume_session_id")?.Trim();
-        if (string.IsNullOrEmpty(resume)) resume = null;
         var folder = FolderOf(Str(args, "folder"));
         if (resume is not null)
         {
@@ -232,11 +355,18 @@ public sealed class Orchestrator
         var first = string.IsNullOrEmpty(message)
             ? null
             : $"{FromParent(parentName)}{message}\n\n{AgentGuide.ChildFooter(name, parentName)}";
-        var tab = _ws.OpenChild(parent, agent, folder, name, first, resume, model: model, effort: effort);
+        HostedTab tab;
+        if (inherit)
+        {
+            _pendingForks.Add(name, parent.Id);
+            try { tab = await _ws.ForkWithContextAsync(parent, agent, folder, name, first, model: model, effort: effort, requireRecordedTurn: true); }
+            finally { _pendingForks.Remove(name); }
+        }
+        else tab = _ws.OpenChild(parent, agent, folder, name, first, resume, model: model, effort: effort);
         starts.Add(DateTime.UtcNow);
-        if (Str(args, "color") is { } colorText) _ws.SetCategory(tab, ParseColor(colorText));
+        if (color is { } category) _ws.SetCategory(tab, category);
 
-        var trust = agent != AgentKind.Claude || first is null || ClaudeConfig.IsTrusted(folder) ? ""
+        var trust = agent != AgentKind.Claude || (first is null && tab.HandoffId is null) || ClaudeConfig.IsTrusted(folder) ? ""
             : ClaudeConfig.IsHome(folder)
                 ? " Claude asks the user to trust the home folder every time it starts there, so your task waits until they answer. A project folder avoids that."
                 : " Claude hasn't been used in this folder before, so it first asks the user to trust the folder; your task waits until then.";
@@ -248,10 +378,13 @@ public sealed class Orchestrator
             (null, { } e) => $", at {e} effort",
             _ => "",
         };
+        string history = inherit ? (tab.HandoffId.HasValue ? ", with a snapshot of your recorded conversation"
+            : ", with no recorded conversation to inherit") : "";
         return $"Started {name}, {AgentProfiles.WithArticle(agent)} child session, in {folder}{runsOn}"
                + (resume is null ? "" : $", resuming conversation {resume}")
+               + history
                + (first is null
-                   ? ". You gave it no first task (the message argument), so it is waiting at its prompt: send the task with message_child. "
+                   ? ". You gave it no first task. Send the task with message_child. "
                    : ", with your task. Agmen tells you when it finishes the turn your task starts. ")
                + "It takes a few seconds to start; list_children shows its status." + renamed + trust;
     }
@@ -264,7 +397,8 @@ public sealed class Orchestrator
         if (child.QueuedCount >= MaxQueued)
             throw new ToolError($"{MaxQueued} messages are already waiting for {NameOf(child)}: {child.HoldReason}.");
         bool report = Bool(args, "report_back") ?? true;
-        child.Enqueue(new OutboxMessage { Text = FromParent(NameOf(parent)) + message, Origin = "parent", ReportTo = report ? parent.Id : null });
+        child.Enqueue(new OutboxMessage { Text = FromParent(NameOf(parent)) + message, Origin = "parent",
+            ReportTo = report ? parent.Id : null, CanDeliver = WatchParentRelationship(_ws.Tabs, parent, child) });
         child.RepliedToParent = false;
         // A child whose session ended starts again, resuming its conversation, and takes the message when ready.
         bool restarted = false;
@@ -289,7 +423,8 @@ public sealed class Orchestrator
         if (parent.IsEnded) throw new ToolError($"Your parent, {NameOf(parent)}, has ended. Tell the user in your reply instead.");
         if (parent.QueuedCount >= MaxQueued)
             throw new ToolError($"{MaxQueued} messages are already waiting for {NameOf(parent)}: {parent.HoldReason}.");
-        parent.Enqueue(new OutboxMessage { Text = $"[From your child, {NameOf(child)}] {message}", Origin = "child" });
+        parent.Enqueue(new OutboxMessage { Text = $"[From your child, {NameOf(child)}] {message}", Origin = "child",
+            CanDeliver = WatchParentRelationship(_ws.Tabs, parent, child) });
         child.RepliedToParent = true;
         return parent.TryDeliver() ? $"Sent to {NameOf(parent)}." : $"Queued for {NameOf(parent)}: {parent.HoldReason}.";
     }
@@ -496,8 +631,14 @@ public sealed class Orchestrator
             var t = find();
             var agent = t.Tab?.Agent ?? AgentKind.Claude;
             var header = Describe(t).ToJsonString(ControlChannel.Json);
-            var path = agent != AgentKind.Claude ? _ws.Agents.StateOf(t.Tab!.Id)?.Transcript
-                : t.SessionId is { } id ? RestoreService.FindTranscriptPath(id, t.Cwd) : null;
+            string? path;
+            if (t.Tab is { Agent: not AgentKind.Claude } tab)
+            {
+                var state = _ws.Agents.StateOf(tab.Id);
+                path = state?.StartedAt == tab.StartedAt && state.Agent == tab.Agent
+                    ? state.Transcript ?? tab.ConfirmedTranscript : tab.ConfirmedTranscript;
+            }
+            else path = t.SessionId is { } id ? RestoreService.FindTranscriptPath(id, t.Cwd) : null;
             return (Header: header, Path: path, t.Cwd, Agent: agent, Waiting: StatusOf(t).StartsWith("waiting", StringComparison.Ordinal));
         });
         if (context.Path is null || !File.Exists(context.Path))

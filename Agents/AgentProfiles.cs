@@ -1,4 +1,5 @@
 using System.IO;
+using System.Diagnostics;
 using System.Windows.Media;
 using Brush = System.Windows.Media.Brush;
 using Color = System.Windows.Media.Color;
@@ -95,6 +96,30 @@ public static class AgentProfiles
         var node = Path.Combine(dir, "node.exe");
         if (!File.Exists(node)) node = FindOnPath("node.exe") ?? "";
         return node.Length == 0 ? null : (node, script);
+    }
+
+    private static readonly Dictionary<string, bool> CodexLocalLaunch = new(StringComparer.OrdinalIgnoreCase);
+
+    // Newer Codex versions can attach to a shared daemon, which puts their MCP processes
+    // outside the tab. Older versions run locally and do not recognize --no-daemon.
+    internal static bool SupportsLocalCodex((string Node, string Script) entry)
+    {
+        if (CodexLocalLaunch.TryGetValue(entry.Script, out bool supported)) return supported;
+        try
+        {
+            var start = new ProcessStartInfo(entry.Node) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+            start.ArgumentList.Add(entry.Script);
+            start.ArgumentList.Add("--help");
+            using var probe = Process.Start(start);
+            if (probe != null)
+            {
+                var output = probe.StandardOutput.ReadToEndAsync();
+                if (!probe.WaitForExit(3000)) probe.Kill(entireProcessTree: true);
+                else supported = probe.ExitCode == 0 && output.GetAwaiter().GetResult().Contains("--no-daemon", StringComparison.Ordinal);
+            }
+        }
+        catch (Exception ex) { Agmen.Services.Log.Write($"Could not check Codex launch options: {ex.Message}"); }
+        return CodexLocalLaunch[entry.Script] = supported;
     }
 
     public static string? FindOnPath(string exe)

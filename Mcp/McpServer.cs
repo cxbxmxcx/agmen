@@ -18,15 +18,14 @@ public static class McpServer
     private static readonly string[] KnownVersions = { "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
     private static readonly object WriteGate = new();
     private static StreamWriter? _out;
-    private static List<int> _chain = new();
     /// <summary>"primary", "tab" or "none", asked of Agmen when the session connects.</summary>
     private static string _role = "none";
 
     public static int Run()
     {
         var ancestry = ProcessTree.Ancestry(Environment.ProcessId);
-        _chain = ancestry.Select(n => n.Pid).ToList();
-        if (ProbeLog.Enabled)
+        bool hosted = ControlChannel.NearestHost(ancestry).HasValue;
+        if (ProbeLog.Enabled && !hosted)
             ProbeLog.Write(new JsonObject
             {
                 ["kind"] = "mcp-start",
@@ -59,8 +58,8 @@ public static class McpServer
             switch (method)
             {
                 case "initialize":
-                    _role = AskRole(ancestry);
-                    if (ProbeLog.Enabled)
+                    _role = AskRole(hosted, parameters["clientInfo"]);
+                    if (ProbeLog.Enabled && !hosted)
                         ProbeLog.Write(new JsonObject
                         {
                             ["kind"] = "mcp-initialize",
@@ -95,12 +94,12 @@ public static class McpServer
     /// config, so it also starts in their sessions outside Agmen; with no Agmen above it in the
     /// process tree it is "none" at once, and offers no tools.
     /// </summary>
-    private static string AskRole(List<ProcessTree.Node> ancestry)
+    private static string AskRole(bool hosted, JsonNode? client)
     {
-        if (!ancestry.Skip(1).Any(n => n.Name.Equals("Agmen", StringComparison.OrdinalIgnoreCase))) return "none";
+        if (!hosted) return "none";
         try
         {
-            var answer = ControlChannel.CallAsync("agmen:role", new JsonObject(), TimeSpan.FromSeconds(5), _chain)
+            var answer = ControlChannel.CallHostAsync("agmen:role", new JsonObject { ["client"] = client?.DeepClone() }, TimeSpan.FromSeconds(5))
                 .GetAwaiter().GetResult();
             return Str(answer["role"]) ?? "none";
         }
@@ -134,7 +133,7 @@ public static class McpServer
         {
             try
             {
-                var answer = await ControlChannel.CallAsync(name, args, TimeSpan.FromSeconds(90), _chain);
+                var answer = await ControlChannel.CallHostAsync(name, args, TimeSpan.FromSeconds(90));
                 bool ok = answer["ok"] is JsonValue v && v.TryGetValue<bool>(out var b) && b;
                 result = ToolResult(Str(answer["text"]) ?? "", isError: !ok);
             }

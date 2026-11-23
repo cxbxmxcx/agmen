@@ -50,21 +50,11 @@ public partial class WorkspaceWindow
     public HostedTab OpenChild(HostedTab parent, AgentKind agent, string cwd, string name, string? firstMessage,
                                string? resumeId, bool select = false, string? model = null, string? effort = null)
     {
-        var tab = new HostedTab(cwd, resumeId, knownTitle: name, agent: agent)
+        var tab = NewChildTab(parent, agent, cwd, name, firstMessage, resumeId, model, effort);
+        if (resumeId is not null)
         {
-            LaunchName = agent == AgentKind.Claude && resumeId is null ? name : null,
-            ParentId = parent.Id,
-            LaunchModel = model,
-            LaunchEffort = effort,
-        };
-        if (firstMessage is not null)
-        {
-            if (resumeId is null && agent is AgentKind.Codex or AgentKind.Antigravity or AgentKind.Kimi)
-            {
-                tab.InitialPrompt = firstMessage;
-                tab.ReportFirstPromptTo = parent.Id;
-            }
-            else tab.Enqueue(new OutboxMessage { Text = firstMessage, Origin = "parent", ReportTo = parent.Id });
+            tab.HandoffId = HandoffForNative(agent, resumeId, parent);
+            WorkspaceSessions.Current.Claim(agent, resumeId);
         }
         AddTab(tab, select);
         StartTab(tab);
@@ -72,21 +62,57 @@ public partial class WorkspaceWindow
         return tab;
     }
 
+    internal static HostedTab NewChildTab(HostedTab parent, AgentKind agent, string cwd, string name,
+                                           string? firstMessage, string? resumeId, string? model,
+                                           string? effort, Guid? handoffId = null)
+    {
+        var tab = new HostedTab(cwd, resumeId, knownTitle: name, agent: agent)
+        {
+            LaunchName = agent == AgentKind.Claude && resumeId is null ? name : null,
+            ParentId = parent.Id,
+            LaunchModel = model,
+            LaunchEffort = effort,
+            HandoffId = handoffId,
+        };
+        if (handoffId.HasValue)
+        {
+            if (firstMessage is null)
+            {
+                tab.InitialPrompt = HandoffPrompt();
+                return tab;
+            }
+            firstMessage = HandoffPrompt() + "\n\n" + firstMessage;
+        }
+        if (firstMessage is not null)
+        {
+            if (resumeId is null && agent is AgentKind.Codex or AgentKind.Antigravity or AgentKind.Kimi)
+            {
+                tab.InitialPrompt = firstMessage;
+                tab.ReportFirstPromptTo = parent.Id;
+            }
+            else tab.Enqueue(new OutboxMessage
+            {
+                Text = firstMessage, Origin = "parent", ReportTo = parent.Id, Key = handoffId.HasValue ? "handoff" : null
+            });
+        }
+        return tab;
+    }
+
     /// <summary>A name no other tab uses: codex-1, codex-2 and so on.</summary>
-    public string UniqueName(AgentKind agent)
+    public string UniqueName(AgentKind agent, IReadOnlySet<string>? reserved = null)
     {
         var prefix = AgentProfiles.ShortName(agent).ToLowerInvariant();
         for (int n = 1; ; n++)
         {
             var name = $"{prefix}-{n}";
-            if (!NameTaken(name)) return name;
+            if (!NameTaken(name, reserved)) return name;
         }
     }
 
     /// <summary>The name itself when no tab uses it, otherwise the next free one: claude-1 becomes claude-2, notes becomes notes-2.</summary>
-    public string FreeName(string name)
+    public string FreeName(string name, IReadOnlySet<string>? reserved = null)
     {
-        if (!NameTaken(name)) return name;
+        if (!NameTaken(name, reserved)) return name;
         var stem = name;
         int n = 2;
         int dash = name.LastIndexOf('-');
@@ -95,11 +121,12 @@ public partial class WorkspaceWindow
             stem = name[..dash];
             n = last + 1;
         }
-        while (NameTaken($"{stem}-{n}")) n++;
+        while (NameTaken($"{stem}-{n}", reserved)) n++;
         return $"{stem}-{n}";
     }
 
-    private bool NameTaken(string name) => _tabs.Any(t => string.Equals(t.Title, name, StringComparison.OrdinalIgnoreCase));
+    private bool NameTaken(string name, IReadOnlySet<string>? reserved = null) => reserved?.Contains(name) == true
+        || _tabs.Any(t => string.Equals(t.Title, name, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Whether a tab may go under another: never under itself or its own descendants, and never too deep.</summary>
     public bool CanMoveUnder(HostedTab tab, HostedTab parent)

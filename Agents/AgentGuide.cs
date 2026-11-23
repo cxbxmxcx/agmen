@@ -15,12 +15,14 @@ public static class AgentGuide
         "You are running inside Agmen, the user's Windows workspace, where agent sessions form a tree. " +
         "Agmen's tools (the agmen MCP server) connect you to it:\n" +
         "- spawn_child starts a child session under you, of any agent (Claude Code, Codex, Kimi Code or Antigravity), with its first task.\n" +
+        "- Set inherit_context on spawn_child when a new child needs your recorded conversation. Use read_handoff to read your own snapshot after a fork or agent switch.\n" +
         "- message_child, read_child and list_children direct and follow your children. You can direct only your own children.\n" +
         "- message_parent reports to the session that started you. When your parent gives you a task, send it your result " +
         "with message_parent when you finish, or your question if you are blocked.\n" +
+        "- If your parent is a top-level tab, list_siblings shows its other children. Use message_sibling to share a chosen message or excerpt with one of them.\n" +
         "- whoami shows your name, your parent and your children.\n" +
         "Messages from your parent arrive as \"[From your parent, <name>]\" and from your children as \"[From your child, <name>]\". " +
-        "When a child finishes a turn you started, Agmen adds an \"[Agmen]\" note; read_child shows what it did. " +
+        "A message from a sibling arrives as \"[From your sibling, <name>]\". When a child finishes a turn you started, Agmen adds an \"[Agmen]\" note; read_child shows what it did. " +
         "Messages without such a label come from the user, typing in your tab: answer those there, " +
         "and use message_parent only for work your parent gave you.\n" +
         "Start child sessions only when the user or your parent asks for them.";
@@ -33,6 +35,7 @@ public static class AgentGuide
         "You are the primary session in Agmen, the user's Windows workspace, at the top of their tree of agent sessions. " +
         "Your instructions are in AGENTS.md in the folder you started in. Agmen's tools (the agmen MCP server) connect you to the sessions:\n" +
         "- spawn_child starts a child session of any agent (Claude Code, Codex, Kimi Code or Antigravity), with its first task.\n" +
+        "- Set inherit_context when a new child needs a snapshot of your recorded conversation. Use read_handoff to read your own snapshot after an agent switch.\n" +
         "- message_child, read_child, list_children and update_child direct and follow your own children.\n" +
         "- list_sessions and read_session show every session, read-only.\n" +
         "Messages from your children arrive as \"[From your child, <name>]\", and Agmen's own notes as \"[Agmen]\". " +

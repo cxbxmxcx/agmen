@@ -14,7 +14,7 @@ public sealed record AgentTabRef(Guid Id, AgentKind Agent, string Cwd, int Pid, 
 
 /// <summary>What the monitor knows about one tab's session beyond its status.</summary>
 public sealed record AgentSessionState(string? SessionId, int TurnsCompleted, string? Transcript, string? LastReply,
-                                       bool AgentRefused = false);
+                                       DateTime StartedAt, AgentKind Agent);
 
 /// <summary>
 /// Follows the sessions of agents that have no live registry like Claude Code's, and reports
@@ -34,6 +34,8 @@ public sealed class AgentMonitor
         public AgentKind Agent;
         public DateTime StartedAt;
         public string? SessionId;
+        public bool Confirmed;
+        public Task? CodexOwnershipCheck;
         /// <summary>The file followed for status: Codex's session file or Kimi's wire.jsonl.</summary>
         public string? File;
         public long Offset;
@@ -64,14 +66,18 @@ public sealed class AgentMonitor
     private readonly Dictionary<Guid, Track> _tracks = new();
 
     /// <summary>Bring every tab's session up to date and report it. Background thread.</summary>
-    public Dictionary<Guid, SessionInfo> Poll(IReadOnlyList<AgentTabRef> tabs)
+    public Dictionary<Guid, SessionInfo> Poll(IReadOnlyList<AgentTabRef> tabs, DateTime? observedAt = null)
     {
+        var capturedAt = observedAt ?? DateTime.Now;
         var result = new Dictionary<Guid, SessionInfo>();
         lock (_gate)
         {
-            foreach (var gone in _tracks.Keys.Where(id => tabs.All(t => t.Id != id)).ToList()) _tracks.Remove(gone);
+            // A hook from a newly launched tab can arrive after the UI took this poll's list.
+            foreach (var gone in _tracks.Where(kv => kv.Value.StartedAt <= capturedAt && tabs.All(t => t.Id != kv.Key))
+                         .Select(kv => kv.Key).ToList()) _tracks.Remove(gone);
             foreach (var tab in tabs)
             {
+                if (_tracks.TryGetValue(tab.Id, out var existing) && existing.StartedAt > tab.StartedAt) continue;
                 var track = TrackFor(tab);
                 try
                 {
@@ -93,19 +99,24 @@ public sealed class AgentMonitor
     {
         lock (_gate)
         {
+            if (_tracks.TryGetValue(tab.Id, out var existing) && existing.StartedAt > tab.StartedAt) return;
             var t = TrackFor(tab);
             t.LastActivity = DateTimeOffset.Now;
             switch (tab.Agent, evt)
             {
                 case (AgentKind.Codex, "notify"):
                     // Sent once per finished turn: it names the session, so a guessed session file is corrected here.
-                    if (Str(payload, "thread-id") is { Length: > 0 } thread && thread != t.SessionId)
+                    if (Str(payload, "thread-id") is { } thread && Guid.TryParseExact(thread, "D", out _))
                     {
+                        t.Confirmed = true;
                         t.SessionId = thread;
                         if (t.File is not null && !t.File.Contains(thread, StringComparison.OrdinalIgnoreCase))
                         {
                             t.File = t.Transcript = null;
                             t.Offset = 0;
+                            t.LastSearch = DateTime.MinValue;
+                            t.LastReply = null;
+                            t.TurnsCompleted = 0;
                         }
                     }
                     t.Status = "idle";
@@ -114,8 +125,15 @@ public sealed class AgentMonitor
                     break;
                 case (AgentKind.Antigravity, _):
                     t.HooksSeen = true;
-                    t.SessionId = Str(payload, "conversationId") ?? t.SessionId;
-                    t.Transcript = Str(payload, "transcriptPath") is { Length: > 0 } path ? Path.GetFullPath(path) : t.Transcript;
+                    if (Str(payload, "conversationId") is { Length: > 0 } conversation)
+                    {
+                        if (t.SessionId != conversation) t.Transcript = null;
+                        t.SessionId = conversation;
+                        t.Confirmed = true;
+                    }
+                    if (t.SessionId is { } conversationId && AntigravityTranscript(conversationId) is { } expected
+                        && Str(payload, "transcriptPath") is { Length: > 0 } path && Path.IsPathFullyQualified(path)
+                        && string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase)) t.Transcript = expected;
                     t.Model = Str(payload, "modelName") ?? t.Model;
                     if (evt == "PreInvocation") t.Status = "busy";
                     else if (evt == "Stop")
@@ -132,14 +150,24 @@ public sealed class AgentMonitor
     public AgentSessionState? StateOf(Guid tabId)
     {
         lock (_gate)
-            return _tracks.TryGetValue(tabId, out var t) ? new AgentSessionState(t.SessionId, t.TurnsCompleted, t.Transcript, t.LastReply, t.AgentRefused) : null;
+            return _tracks.TryGetValue(tabId, out var t) && t.Confirmed
+                ? new AgentSessionState(t.SessionId, t.TurnsCompleted, t.Transcript, t.LastReply, t.StartedAt, t.Agent) : null;
+    }
+
+    /// <summary>
+    /// True when Antigravity's log says it can't build the agent this tab started it as. No hook
+    /// fires in such a session, so it is never confirmed and <see cref="StateOf"/> has nothing on it.
+    /// </summary>
+    public bool AgentRefused(Guid tabId)
+    {
+        lock (_gate) return _tracks.TryGetValue(tabId, out var t) && t.AgentRefused;
     }
 
     private Track TrackFor(AgentTabRef tab)
     {
         if (_tracks.TryGetValue(tab.Id, out var t) && t.StartedAt == tab.StartedAt) return t;
         // A new tab, or the tab was started again: follow its session from scratch.
-        t = new Track { Agent = tab.Agent, StartedAt = tab.StartedAt, SessionId = tab.SessionId };
+        t = new Track { Agent = tab.Agent, StartedAt = tab.StartedAt, SessionId = tab.SessionId, Confirmed = tab.SessionId != null };
         _tracks[tab.Id] = t;
         return t;
     }
@@ -147,7 +175,7 @@ public sealed class AgentMonitor
     private static SessionInfo ToInfo(AgentTabRef tab, Track t) => new()
     {
         Pid = tab.Pid,
-        SessionId = t.SessionId ?? "",
+        SessionId = t.Confirmed ? t.SessionId ?? "" : "",
         Cwd = tab.Cwd,
         Entrypoint = AgentProfiles.Id(tab.Agent),
         // A session that hasn't reported yet is sitting at its prompt.
@@ -162,6 +190,93 @@ public sealed class AgentMonitor
     };
 
     // ------------------------------------------------------------ Codex
+
+    /// <summary>Resolve the first turn of a fresh Codex tab before its first turn-finished notification.</summary>
+    internal Task ConfirmCodexIdentityAsync(AgentTabRef tab)
+    {
+        if (tab.Agent != AgentKind.Codex || tab.Pid <= 0 || tab.SessionId != null) return Task.CompletedTask;
+        lock (_gate)
+        {
+            if (_tracks.TryGetValue(tab.Id, out var existing) && existing.StartedAt > tab.StartedAt) return Task.CompletedTask;
+            var track = TrackFor(tab);
+            if (track.Confirmed) return Task.CompletedTask;
+            // A check is only requested for a handoff. Neither the UI nor other monitor users
+            // wait on the monitor lock while Windows checks a candidate file.
+            return track.CodexOwnershipCheck ??= Task.Run(() =>
+            {
+                try
+                {
+                    var owned = OwnedCodexRollout(tab, RecentCodexFiles(tab), path =>
+                        WindowsFileOwners.Get(path)?.Any(pid => CodexWriterChain(ProcessTree.Ancestry(pid, 2), tab.Pid)));
+                    if (owned is not { } match) return;
+                    lock (_gate)
+                    {
+                        if (!_tracks.TryGetValue(tab.Id, out var current) || current != track || current.Confirmed) return;
+                        if (current.File != match.Path)
+                            _tracks[tab.Id] = current = new Track { Agent = tab.Agent, StartedAt = tab.StartedAt };
+                        current.SessionId = match.Id;
+                        current.File = current.Transcript = match.Path;
+                        current.Confirmed = true;
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+                {
+                    // A disappearing file or partial metadata cannot confirm ownership; notify still can.
+                }
+                finally { lock (_gate) track.CodexOwnershipCheck = null; }
+            });
+        }
+    }
+
+    // On Windows codex.js runs the native CLI as the direct child of the terminal's node.exe.
+    internal static bool CodexWriterChain(IReadOnlyList<ProcessTree.Node> chain, int terminalPid) =>
+        chain.Count == 2 && chain[1].Pid == terminalPid
+        && string.Equals(chain[0].Name, "codex", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(chain[1].Name, "node", StringComparison.OrdinalIgnoreCase);
+
+    internal static (string Id, string Path)? OwnedCodexRollout(AgentTabRef tab, IEnumerable<string> candidates,
+        Func<string, bool?> heldByCli)
+    {
+        (string Id, string Path)? result = null;
+        foreach (string path in candidates)
+        {
+            if (CodexCandidateId(tab, path, requireCli: true) is not { } id) continue;
+            var held = heldByCli(path);
+            if (held is null || held.Value && result.HasValue) return null;
+            if (held.Value) result = (id, path);
+        }
+        return result;
+    }
+
+    private static IEnumerable<string> RecentCodexFiles(AgentTabRef tab)
+    {
+        var since = tab.StartedAt.AddSeconds(-10);
+        var dates = new[] { DateTime.Now, DateTime.UtcNow, since, since.ToUniversalTime() }
+            .SelectMany(day => new[] { day.Date, day.Date.AddDays(-1) }).Distinct();
+        foreach (var day in dates)
+        {
+            var dir = Path.Combine(CodexSessions, day.ToString("yyyy/MM/dd", CultureInfo.InvariantCulture));
+            if (!Directory.Exists(dir)) continue;
+            foreach (var file in new DirectoryInfo(dir).EnumerateFiles("rollout-*.jsonl")
+                         .Where(f => f.LastWriteTime >= since).OrderByDescending(f => f.CreationTime))
+                yield return file.FullName;
+        }
+    }
+
+    private static string? CodexCandidateId(AgentTabRef tab, string path, bool requireCli)
+    {
+        var meta = FirstLine(path);
+        if (meta is null) return null;
+        using var doc = JsonDocument.Parse(meta);
+        var row = doc.RootElement;
+        if (Str(row, "type") != "session_meta" || !row.TryGetProperty("payload", out var p)
+            || requireCli && Str(p, "source") != "cli" || !SameFolder(Str(p, "cwd"), tab.Cwd)
+            || !DateTimeOffset.TryParse(Str(p, "timestamp"), out var began) || began.LocalDateTime < tab.StartedAt.AddSeconds(-10))
+            return null;
+        var id = Str(p, "id");
+        return Guid.TryParseExact(id, "D", out _) && Path.GetFileName(path).EndsWith("-" + id + ".jsonl", StringComparison.OrdinalIgnoreCase)
+            ? id : null;
+    }
 
     private void PollCodex(AgentTabRef tab, Track t)
     {
@@ -179,7 +294,7 @@ public sealed class AgentMonitor
     /// <summary>The session file of a known Codex session.</summary>
     public static string? FindCodexFile(string sessionId)
     {
-        if (!Directory.Exists(CodexSessions)) return null;
+        if (!Guid.TryParseExact(sessionId, "D", out _) || !Directory.Exists(CodexSessions)) return null;
         try
         {
             return Directory.EnumerateFiles(CodexSessions, $"rollout-*{sessionId}.jsonl", SearchOption.AllDirectories)
@@ -188,6 +303,10 @@ public sealed class AgentMonitor
         catch (Exception) { return null; }
     }
 
+    internal static string? AntigravityTranscript(string sessionId) => Guid.TryParseExact(sessionId, "D", out _)
+        ? Path.Combine(Home, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl")
+        : null;
+
     /// <summary>
     /// A new Codex session writes its file on the first prompt. Its first record names the folder
     /// and the time the session began, which picks out this tab's file from other sessions'.
@@ -195,24 +314,11 @@ public sealed class AgentMonitor
     private string? ClaimCodexFile(AgentTabRef tab, Track t)
     {
         var claimed = _tracks.Values.Where(x => x != t && x.File is not null).Select(x => x.File!).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var since = tab.StartedAt.AddSeconds(-10);
-        foreach (var day in new[] { DateTime.Now, DateTime.Now.AddDays(-1) })
+        foreach (var path in RecentCodexFiles(tab))
         {
-            var dir = Path.Combine(CodexSessions, day.ToString("yyyy"), day.ToString("MM"), day.ToString("dd"));
-            if (!Directory.Exists(dir)) continue;
-            foreach (var file in new DirectoryInfo(dir).EnumerateFiles("rollout-*.jsonl")
-                         .Where(f => f.LastWriteTime >= since).OrderByDescending(f => f.CreationTime))
-            {
-                if (claimed.Contains(file.FullName)) continue;
-                var meta = FirstLine(file.FullName);
-                if (meta is null) continue;
-                using var doc = JsonDocument.Parse(meta);
-                if (!doc.RootElement.TryGetProperty("payload", out var p)) continue;
-                if (!SameFolder(Str(p, "cwd"), tab.Cwd)) continue;
-                if (!DateTimeOffset.TryParse(Str(p, "timestamp"), out var began) || began.LocalDateTime < since) continue;
-                t.SessionId = Str(p, "id") ?? t.SessionId;
-                return file.FullName;
-            }
+            if (claimed.Contains(path) || CodexCandidateId(tab, path, requireCli: false) is not { } id) continue;
+            t.SessionId = id;
+            return path;
         }
         return null;
     }
@@ -336,6 +442,23 @@ public sealed class AgentMonitor
 
     private void PollKimi(AgentTabRef tab, Track t)
     {
+        if (!t.Confirmed && DateTime.UtcNow - t.LastSearch >= TimeSpan.FromSeconds(3))
+        {
+            if (KimiSessionForProcess(tab.Cwd, tab.Pid) is { } owned)
+            {
+                if (t.SessionId != owned.Id)
+                {
+                    t.File = t.Transcript = null;
+                    t.Offset = 0;
+                    t.TurnsCompleted = 0;
+                    t.LastReply = null;
+                    t.Status = "";
+                }
+                t.Confirmed = true;
+                t.SessionId = owned.Id;
+            }
+            else if (t.File != null) t.LastSearch = DateTime.UtcNow;
+        }
         if (t.File is null)
         {
             if (DateTime.UtcNow - t.LastSearch < TimeSpan.FromSeconds(3)) return;
@@ -347,6 +470,38 @@ public sealed class AgentMonitor
             t.File = t.Transcript = wire;
         }
         foreach (var line in ReadNewLines(t.File, ref t.Offset)) ApplyKimi(line, t);
+    }
+
+    // Multiple Kimi tabs can share a workdir. Its held session lock identifies the CLI process
+    // even when an effort override placed a cmd.exe between the terminal and Kimi.
+    internal static (string Id, string Dir)? KimiSessionForProcess(string cwd, int pid, string? home = null)
+    {
+        var locks = Path.Combine(home ?? KimiHome, "locks", "sessions");
+        if (pid <= 0 || !Directory.Exists(locks)) return null;
+        foreach (var file in Directory.EnumerateFiles(locks, "*.lock"))
+        {
+            if (!KimiLockBelongsTo(file, pid)) continue;
+            string id = Path.GetFileNameWithoutExtension(file);
+            foreach (var session in KimiIndex(home))
+                if (session.Id.Equals(id, StringComparison.OrdinalIgnoreCase) && SameFolder(cwd, session.WorkDir))
+                    return (id, session.Dir);
+        }
+        return null;
+    }
+
+    private static bool KimiLockBelongsTo(string file, int pid)
+    {
+        if (pid <= 0) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(file));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object || !doc.RootElement.TryGetProperty("pid", out var value)
+                || value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var owner) || owner <= 0) return false;
+            return ProcessTree.Ancestry(owner).Any(node => node.Pid == pid);
+        }
+        catch (IOException) { return false; }
+        catch (JsonException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>A Kimi session's folder and working directory, from Kimi's session index.</summary>
@@ -383,9 +538,9 @@ public sealed class AgentMonitor
     }
 
     /// <summary>Every session in Kimi's session index: its id, its folder of records, and its working folder.</summary>
-    internal static IEnumerable<(string Id, string Dir, string WorkDir)> KimiIndex()
+    internal static IEnumerable<(string Id, string Dir, string WorkDir)> KimiIndex(string? home = null)
     {
-        var index = Path.Combine(KimiHome, "session_index.jsonl");
+        var index = Path.Combine(home ?? KimiHome, "session_index.jsonl");
         if (!System.IO.File.Exists(index)) return Array.Empty<(string, string, string)>();
         var list = new List<(string, string, string)>();
         foreach (var line in ReadAllLinesShared(index))

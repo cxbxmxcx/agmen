@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Input;
 using Agmen.Agents;
 using Agmen.Hosting;
+using Agmen.Services;
 using Brush = System.Windows.Media.Brush;
 
 namespace Agmen;
@@ -59,6 +60,8 @@ public partial class HistoryWindow : Window
     {
         InitializeComponent();
         _workspace = workspace;
+        if (!AppPaths.IsDefaultWorkspace)
+            HistoryDescription.Text = $"Reopen a conversation from the {AppPaths.WorkspaceName} workspace.";
         Loaded += async (_, _) => await LoadAsync();
         Activated += (_, _) => { if (_rows.Count > 0) Refresh(); };
     }
@@ -68,7 +71,9 @@ public partial class HistoryWindow : Window
         // Agmen's own history shows at once; the agents' records can take a moment to read.
         Status.Text = "Looking through each agent's sessions…";
         BuildRows(SessionHistory.Load(), Array.Empty<FoundSession>());
-        var found = await Task.Run(() => SessionDiscovery.Recent(Lookback));
+        if (!AppPaths.IsDefaultWorkspace) return;
+        var scope = WorkspaceSessions.Current;
+        var found = await Task.Run(() => SessionDiscovery.Recent(Lookback).Where(s => scope.Visible(s.Agent, s.SessionId)).ToList());
         BuildRows(SessionHistory.Load(), found);
     }
 
@@ -80,13 +85,13 @@ public partial class HistoryWindow : Window
         var rows = new List<Row>();
         foreach (var entry in history)
         {
-            if (AgentProfiles.Parse(entry.Agent) is not { } agent || IsOpen(agent, entry.SessionId)) continue;
+            if (AgentProfiles.Parse(entry.Agent) is not { } agent || _workspace.TabFor(agent, entry) is not null) continue;
             rows.Add(new Row
             {
                 Agent = agent, SessionId = entry.SessionId, Cwd = entry.Cwd, Title = entry.Title, When = entry.ClosedAt.LocalDateTime,
                 Closed = entry,
                 Below = SessionHistory.ClosedUnder(entry, history)
-                    .Where(e => AgentProfiles.Parse(e.Agent) is { } a && !IsOpen(a, e.SessionId)).ToList(),
+                    .Where(e => AgentProfiles.Parse(e.Agent) is { } a && _workspace.TabFor(a, e) is null).ToList(),
             });
         }
         foreach (var f in found)

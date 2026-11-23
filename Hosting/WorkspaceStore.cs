@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using Agmen.Agents;
 using Agmen.Services;
 
 namespace Agmen.Hosting;
@@ -12,8 +13,10 @@ namespace Agmen.Hosting;
 /// </summary>
 public sealed record SavedTab(Guid Id, string Cwd, string? SessionId, string? Title, bool Ended, string? Category = null,
                              bool IsPrimary = false, string? Note = null, string? Agent = null,
-                             Guid? ParentId = null, bool Collapsed = false, string? Model = null, string? Effort = null);
+                             Guid? ParentId = null, bool Collapsed = false, string? Model = null, string? Effort = null,
+                             Guid? HandoffId = null);
 public sealed record SavedBounds(double Left, double Top, double Width, double Height, bool Maximized);
+public sealed record NativeHandoff(Guid HistoryId, Guid? ParentId);
 
 /// <summary>Everything the workspace needs to come back after a restart or a crash.</summary>
 public sealed class WorkspaceState
@@ -34,6 +37,26 @@ public sealed class WorkspaceState
     public string? PrimaryAgent { get; set; }
     /// <summary>Each agent's own primary conversation, by agent id, so switching back to an agent resumes it.</summary>
     public Dictionary<string, string>? PrimarySessions { get; set; }
+    public Dictionary<string, Guid>? PrimaryHandoffs { get; set; }
+    public Dictionary<string, NativeHandoff>? NativeHandoffs { get; set; }
+
+    internal void RememberNativeHandoff(HostedTab tab)
+    {
+        if (tab.SessionId is not { Length: > 0 } id || tab.HandoffId is not { } history) return;
+        (NativeHandoffs ??= new())[NativeKey(tab.Agent, id)] = new NativeHandoff(history, tab.ParentId);
+    }
+
+    internal Guid? HandoffForNative(AgentKind agent, string? sessionId, HostedTab? caller)
+    {
+        if (sessionId is null || NativeHandoffs is null || !NativeHandoffs.TryGetValue(NativeKey(agent, sessionId), out var saved)
+            || saved == null)
+            return null;
+        if (caller is not null && !caller.IsPrimary && saved.ParentId != caller.Id)
+            throw new InvalidOperationException("Only the original parent can reopen this child's inherited conversation. The user can reopen it from History.");
+        return saved.HistoryId;
+    }
+
+    private static string NativeKey(AgentKind agent, string id) => AgentProfiles.Id(agent) + ":" + id.ToLowerInvariant();
 }
 
 public static class WorkspaceStore

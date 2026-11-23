@@ -23,7 +23,7 @@ namespace Agmen.Agents;
 /// </summary>
 public static class AgentConnect
 {
-    public enum State { NotInstalled, NotConnected, Connected, ConnectedElsewhere, Unreadable }
+    public enum State { NotInstalled, NotConnected, Connected, ConnectedElsewhere, Unreadable, RegistrationRemaining, Incomplete }
 
     public static readonly AgentKind[] Connectable = { AgentKind.Kimi, AgentKind.Antigravity };
 
@@ -62,26 +62,62 @@ public static class AgentConnect
     private static string AgentText(AgentKind agent) =>
         agent == AgentKind.Kimi ? AgentGuide.KimiAgent() : AgentGuide.AntigravityAgent();
 
-    public static State StateOf(AgentKind agent)
+    public static State StateOf(AgentKind agent) => RegistrationState(AgentProfiles.IsInstalled(agent), McpFile(agent),
+        here => HasProviderSetup(agent, here));
+
+    internal static State RegistrationState(bool installed, string mcpFile, Func<bool, bool> hasProviderSetup)
     {
-        if (!AgentProfiles.IsInstalled(agent)) return State.NotInstalled;
         try
         {
-            var server = Read(McpFile(agent))?["mcpServers"]?[Key] as JsonObject;
-            var hooks = agent == AgentKind.Antigravity ? Read(AntigravityHooksFile)?[Key] as JsonObject : new JsonObject();
-            bool approved = agent == AgentKind.Kimi ? KimiRuleRange(KimiConfigLines()) is not null : HasAntigravityGrant();
-            if (server is null || hooks is null || !approved || !File.Exists(AgentFile(agent))) return State.NotConnected;
-            bool here = IsThisCopy(server);
-            // Hooks that differ from what this copy writes, such as an older Agmen's, need Connect again.
-            if (here && agent == AgentKind.Antigravity && !JsonNode.DeepEquals(hooks, AntigravityHooks())) return State.NotConnected;
+            var server = Read(mcpFile)?["mcpServers"]?[Key] as JsonObject;
+            if (server == null) return installed ? State.NotConnected : State.NotInstalled;
+            bool here = UsesThisInstallation(server);
+            if (!installed) return here ? State.RegistrationRemaining : State.NotInstalled;
+            if (here && (server["args"] is not JsonArray { Count: 1 } args || args[0] is not JsonValue argument
+                || !argument.TryGetValue<string>(out var mode) || mode != "--mcp"))
+                return State.Incomplete;
+            if (!hasProviderSetup(here)) return here ? State.Incomplete : State.NotConnected;
             return here ? State.Connected : State.ConnectedElsewhere;
         }
-        catch (Exception) { return State.Unreadable; }
+        catch (Exception) { return installed ? State.Unreadable : State.NotInstalled; }
+    }
+
+    private static bool HasProviderSetup(AgentKind agent, bool here)
+    {
+        if (!File.Exists(AgentFile(agent))) return false;
+        if (agent == AgentKind.Kimi) return KimiRuleRange(KimiConfigLines()) is not null;
+        var hooks = Read(AntigravityHooksFile)?[Key] as JsonObject;
+        return hooks != null && HasAntigravityGrant() && (!here || JsonNode.DeepEquals(hooks, AntigravityHooks()));
+    }
+
+    // Older installations pinned AGMEN_INSTANCE here. This executable now finds its
+    // workspace from the live process tree, so the same registration works for every window.
+    internal static bool UsesThisInstallation(JsonObject server) =>
+        server["command"] is JsonValue value && value.TryGetValue<string>(out var command)
+        && Path.IsPathFullyQualified(command)
+        && string.Equals(Path.GetFullPath(command), Path.GetFullPath(ToolServer.Exe), StringComparison.OrdinalIgnoreCase);
+
+    internal static bool HasInstalledServerReference()
+    {
+        foreach (var agent in Connectable)
+        {
+            try
+            {
+                if (Read(McpFile(agent))?["mcpServers"]?[Key] is JsonObject server && UsesThisInstallation(server)) return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException)
+            {
+                // A partial or unreadable provider configuration cannot identify the executable being removed.
+            }
+        }
+        return false;
     }
 
     public static string Describe(AgentKind agent, State state) => state switch
     {
         State.NotInstalled => $"{AgentProfiles.DisplayName(agent)} isn't installed.",
+        State.RegistrationRemaining => $"{AgentProfiles.DisplayName(agent)} is unavailable. Disconnect to remove its saved Agmen connection.",
+        State.Incomplete => "This copy's connection is incomplete. Connect to repair it or Disconnect to remove it.",
         State.Connected => "Connected to this copy of Agmen.",
         State.ConnectedElsewhere => "Connected to another copy of Agmen. Connect again to point it at this one.",
         State.Unreadable => $"Its config file isn't valid JSON, so Agmen leaves it alone. Fix {Shown(McpFile(agent))} first.",
@@ -89,14 +125,6 @@ public static class AgentConnect
             ? "Not connected. Its tabs can't show when they're working, and its sessions can't use Agmen's tools."
             : "Not connected. Its tabs still show their status, but its sessions can't use Agmen's tools.",
     };
-
-    /// <summary>Whether an agent's agmen server entry starts this copy of Agmen's tool server, for this instance.</summary>
-    private static bool IsThisCopy(JsonObject? server) =>
-        server is not null
-        && server["command"] is JsonValue c && c.TryGetValue<string>(out var command)
-        && string.Equals(Path.GetFullPath(command), Path.GetFullPath(ToolServer.Exe), StringComparison.OrdinalIgnoreCase)
-        && server["env"]?["AGMEN_INSTANCE"] is JsonValue i && i.TryGetValue<string>(out var instance)
-        && instance == AppPaths.InstanceName;
 
     /// <summary>
     /// Why a session of this agent that starts now has none of this copy's tools, and what to do,
@@ -112,19 +140,16 @@ public static class AgentConnect
         {
             case State.Connected:
             case State.NotInstalled:
+            case State.RegistrationRemaining:
+            // Partly connected, such as hooks an older Agmen wrote: the tool server is this
+            // copy's, so the session has the tools.
+            case State.Incomplete:
                 return null;
             case State.ConnectedElsewhere:
                 return $"{name} is connected to another copy of Agmen, so this session has none of this copy's tools." + remedy;
             case State.Unreadable:
                 return $"Agmen can't read {name}'s config, so this session may have none of Agmen's tools.";
             default:
-                // Partly connected, such as hooks an older Agmen wrote: the tool server is this
-                // copy's, so the session has the tools.
-                try
-                {
-                    if (IsThisCopy(Read(McpFile(agent))?["mcpServers"]?[Key] as JsonObject)) return null;
-                }
-                catch (Exception) { /* unreadable after all: say it isn't connected */ }
                 return $"{name} isn't connected to Agmen, so this session has none of Agmen's tools." + remedy;
         }
     }
@@ -136,14 +161,20 @@ public static class AgentConnect
     /// </summary>
     public static string? AgentFor(AgentKind agent)
     {
-        if (!Connectable.Contains(agent) || StateOf(agent) != State.Connected) return null;
+        if (!Connectable.Contains(agent)) return null;
+        string? name = null;
         try
         {
-            var path = AgentFile(agent);
-            if (File.ReadAllText(path) != AgentText(agent)) File.WriteAllText(path, AgentText(agent));
+            EditConfig(() =>
+            {
+                if (StateOf(agent) != State.Connected) return;
+                name = AgentGuide.AgentName;
+                var path = AgentFile(agent);
+                if (File.ReadAllText(path) != AgentText(agent)) WriteText(path, AgentText(agent));
+            });
         }
         catch (Exception ex) { Log.Write($"connect: couldn't update {AgentFile(agent)}: {ex.Message}"); }
-        return AgentGuide.AgentName;
+        return name;
     }
 
     /// <summary>Exactly what Connect writes, for the user to read before choosing.</summary>
@@ -186,7 +217,7 @@ public static class AgentConnect
         return sb.ToString();
     }
 
-    public static void Connect(AgentKind agent)
+    public static void Connect(AgentKind agent) => EditConfig(() =>
     {
         Update(McpFile(agent), root => ObjectAt(root, "mcpServers")[Key] = ToolServer.Entry());
         ShareServers(agent, again: true);
@@ -202,22 +233,23 @@ public static class AgentConnect
         else AddKimiRule();
         var file = AgentFile(agent);
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-        File.WriteAllText(file, AgentText(agent));
+        WriteText(file, AgentText(agent));
         Log.Write($"connect: {AgentProfiles.DisplayName(agent)} now uses {ToolServer.Exe}");
-    }
+    });
 
-    public static void Disconnect(AgentKind agent)
+    public static void Disconnect(AgentKind agent) => EditConfig(() =>
     {
         UnshareServers(agent);
         Update(McpFile(agent), root => (root["mcpServers"] as JsonObject)?.Remove(Key));
         if (agent == AgentKind.Antigravity)
         {
-            Update(AntigravityHooksFile, root => root.Remove(Key));
-            Update(AntigravitySettingsFile, root =>
-            {
-                if (root["permissions"]?["allow"] is JsonArray allow)
-                    foreach (var grant in allow.Where(IsAgmenGrant).ToList()) allow.Remove(grant);
-            });
+            if (File.Exists(AntigravityHooksFile)) Update(AntigravityHooksFile, root => root.Remove(Key));
+            if (File.Exists(AntigravitySettingsFile))
+                Update(AntigravitySettingsFile, root =>
+                {
+                    if (root["permissions"]?["allow"] is JsonArray allow)
+                        foreach (var grant in allow.Where(IsAgmenGrant).ToList()) allow.Remove(grant);
+                });
         }
         else RemoveKimiRule();
         var file = AgentFile(agent);
@@ -227,6 +259,20 @@ public static class AgentConnect
             && Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any())
             Directory.Delete(folder);
         Log.Write($"connect: {AgentProfiles.DisplayName(agent)} disconnected");
+    });
+
+    // Agent config files are user-global, including when workspaces run in parallel.
+    private static void EditConfig(Action edit)
+    {
+        using var mutex = new Mutex(false, "Agmen.AgentConfiguration",
+            new NamedWaitHandleOptions { CurrentUserOnly = true, CurrentSessionOnly = false });
+        try
+        {
+            if (!mutex.WaitOne(TimeSpan.FromSeconds(5))) throw new IOException("Another workspace is updating the agent configuration.");
+        }
+        catch (AbandonedMutexException) { /* its owner exited; this thread now holds the mutex */ }
+        try { edit(); }
+        finally { mutex.ReleaseMutex(); }
     }
 
     /// <summary>One hook per event that tells Agmen a session started, a model call began, or a turn ended.</summary>
@@ -252,7 +298,7 @@ public static class AgentConnect
     // ------------------------------------------------------------ shared MCP servers
 
     /// <summary>What Agmen added to each agent's MCP config, as it wrote it, and the names the user removed since.</summary>
-    private static string SharedRecordFile => AppPaths.PathOf("shared-servers.json");
+    private static string SharedRecordFile => Path.Combine(AppPaths.FamilyDir, "shared-servers.json");
 
     private static List<(string Name, JsonObject Entry)> SharedEntries(AgentKind agent) =>
         SharedServers.Load().Select(s => (s.Name, Entry: SharedServers.EntryFor(agent, s)))
@@ -261,8 +307,8 @@ public static class AgentConnect
     /// <summary>Before one of the agent's sessions starts: keep its config in step with the shared servers, if this copy is connected.</summary>
     public static void KeepServersShared(AgentKind agent)
     {
-        if (!Connectable.Contains(agent) || StateOf(agent) != State.Connected) return;
-        try { ShareServers(agent, again: false); }
+        if (!Connectable.Contains(agent)) return;
+        try { EditConfig(() => { if (StateOf(agent) == State.Connected) ShareServers(agent, again: false); }); }
         catch (Exception ex) { Log.Write($"connect: couldn't share MCP servers with {AgentProfiles.DisplayName(agent)}: {ex.Message}"); }
     }
 
@@ -321,7 +367,7 @@ public static class AgentConnect
             Log.Write($"connect: {AgentProfiles.DisplayName(agent)} servers "
                       + string.Join(", ", changes.Select(c => (c.Value is null ? "-" : "+") + c.Key)));
         }
-        if (records.ToJsonString() != before) File.WriteAllText(recordFile, records.ToJsonString(Indented) + "\n");
+        if (records.ToJsonString() != before) WriteText(recordFile, records.ToJsonString(Indented) + "\n");
 
         bool Declined(string name) => declined.Any(d => d is JsonValue v && v.TryGetValue<string>(out var s) && s == name);
     }
@@ -343,7 +389,7 @@ public static class AgentConnect
                     if (root["mcpServers"] is JsonObject all) foreach (var name in ours) all.Remove(name);
                 });
         }
-        if (records.Remove(AgentProfiles.Id(agent))) File.WriteAllText(recordFile, records.ToJsonString(Indented) + "\n");
+        if (records.Remove(AgentProfiles.Id(agent))) WriteText(recordFile, records.ToJsonString(Indented) + "\n");
     }
 
     // ------------------------------------------------------------ Kimi's config.toml
@@ -415,9 +461,7 @@ public static class AgentConnect
         var path = KimiConfigFile;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         if (File.Exists(path) && !File.Exists(path + ".agmen-backup")) File.Copy(path, path + ".agmen-backup");
-        var tmp = path + ".agmen-tmp";
-        File.WriteAllText(tmp, text);
-        File.Move(tmp, path, overwrite: true);
+        WriteText(path, text);
     }
 
     // ------------------------------------------------------------ JSON config files
@@ -429,8 +473,14 @@ public static class AgentConnect
         var root = Read(path) ?? new JsonObject();
         if (File.Exists(path) && !File.Exists(path + ".agmen-backup")) File.Copy(path, path + ".agmen-backup");
         change(root);
+        WriteText(path, root.ToJsonString(Indented) + "\n");
+    }
+
+    private static void WriteText(string path, string text)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var tmp = path + ".agmen-tmp";
-        File.WriteAllText(tmp, root.ToJsonString(Indented) + "\n");
+        File.WriteAllText(tmp, text);
         File.Move(tmp, path, overwrite: true);
     }
 

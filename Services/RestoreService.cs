@@ -67,7 +67,7 @@ public static class RestoreService
     /// Claude Code writes transcripts itself, so this works even when
     /// Agmen wasn't running before a crash.
     /// </summary>
-    public static List<RecentSession> RecentFromTranscripts(TimeSpan window)
+    public static List<RecentSession> RecentFromTranscripts(TimeSpan window, Func<string, bool>? include = null)
     {
         var cutoff = DateTime.Now - window;
         var result = new List<RecentSession>();
@@ -84,7 +84,7 @@ public static class RestoreService
                 try
                 {
                     var fi = new FileInfo(file);
-                    if (fi.LastWriteTime < cutoff) continue;
+                    if (fi.LastWriteTime < cutoff || include?.Invoke(Path.GetFileNameWithoutExtension(file)) == false) continue;
                     var entry = EntryFromTranscript(file);
                     if (entry is not null) result.Add(new RecentSession(entry, fi.LastWriteTime));
                 }

@@ -2,12 +2,7 @@ using System.IO;
 
 namespace Agmen.Services;
 
-/// <summary>
-/// Where this instance keeps its state. Debug builds run as a separate "dev"
-/// instance with their own data folder, single-instance lock, and tray icon,
-/// so Agmen can be rebuilt and tested while the release copy keeps
-/// hosting real sessions.
-/// </summary>
+/// <summary>Workspace identity and the files used by this process and its hosted agents.</summary>
 public static class AppPaths
 {
 #if DEBUG
@@ -16,20 +11,33 @@ public static class AppPaths
     public static bool IsDev => false;
 #endif
 
-    /// <summary>
-    /// Base name for the data folder and the named mutex and event. AGMEN_INSTANCE
-    /// overrides it, so a test copy can run beside the copies people use, with its own data.
-    /// </summary>
-    public static string InstanceName { get; } =
-        Environment.GetEnvironmentVariable("AGMEN_INSTANCE") is { Length: > 0 } custom
-        && custom.All(c => char.IsLetterOrDigit(c) || c is '-' or '_')
-            ? custom
-            : IsDev ? "Agmen-dev" : "Agmen";
+    private static WorkspaceIdentity _current = WorkspaceIdentity.FromEnvironment();
+    public static string FamilyName => _current.Family;
+    public static string FamilyDir => _current.FamilyDir;
+    public static string WorkspaceName => _current.Name;
+    public static bool IsDefaultWorkspace => _current.IsDefault;
+    public static string InstanceName => _current.Instance;
+    public static string DataDir => _current.DataDir;
+    public static bool OwnsGlobalHotkeys => !IsDev && IsDefaultWorkspace && FamilyName == "Agmen";
+    public static string WorkspaceTitle
+    {
+        get
+        {
+            var app = FamilyName switch { "Agmen" => "Agmen", "Agmen-dev" => "Agmen (dev)", var other => $"Agmen ({other})" };
+            return IsDefaultWorkspace ? app : $"{WorkspaceName} — {app}";
+        }
+    }
 
-    public static string DataDir { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), InstanceName);
+    // Called once by a GUI launch, before acquiring the workspace's mutex or starting any agents.
+    internal static void SelectWorkspace(string? requested)
+    {
+        var next = requested == null ? _current : new WorkspaceIdentity(FamilyName, requested);
+        _current = NamedWorkspaces.Remember(next);
+        Environment.SetEnvironmentVariable("AGMEN_INSTANCE", InstanceName);
+        Environment.SetEnvironmentVariable("AGMEN_WORKSPACE_FAMILY", FamilyName);
+        Environment.SetEnvironmentVariable("AGMEN_WORKSPACE_NAME", WorkspaceName);
+    }
 
-    /// <summary>Full path of a file in the data folder, creating the folder if needed.</summary>
     public static string PathOf(string fileName)
     {
         Directory.CreateDirectory(DataDir);

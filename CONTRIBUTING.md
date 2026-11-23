@@ -33,7 +33,7 @@ Two things to know:
 - **A running copy locks its build output.** If you use the dev copy for real work, build your changes somewhere else: `dotnet build --artifacts-path ..\agmen-build`.
 - **Kimi Code and Antigravity point at one copy at a time.** Their global config holds the path of the Agmen that connected them. **Connect** in a second copy moves them to it, and the sessions in the first copy lose Agmen's tools until you Connect there again.
 
-To try a release build, run `.\publish.ps1`, which writes `out\Agmen\Agmen.exe` and the zip a release ships.
+To try a release build, run `.\publish.ps1`. It writes the portable app, zip and offline `out\Agmen-Setup-x64.exe` installer. Use `-NoZip` for a folder-only build.
 
 To test without touching your own tabs, set `AGMEN_INSTANCE` to a name of your choice, such as `Agmen-test`. That copy gets its own data folder, lock and tool pipe. `docs\launch\demo-setup.ps1` builds a complete sample workspace that way.
 
@@ -54,7 +54,7 @@ To test without touching your own tabs, set `AGMEN_INSTANCE` to a name of your c
 - Open an issue first for anything larger than a fix, so we agree on the approach before you write it.
 - Keep a pull request to one change. Say what you tested and with which agent versions.
 - Match the code around you: file-scoped namespaces, nullable enabled, a summary comment on each type that says why it exists. Comments explain reasons, not what the next line does.
-- There are no automated tests yet. Run the app and try the change with a real session. If you touch an agent's profile, say which version of that CLI you ran.
+- Run the checks with `dotnet run --project Tests/Agmen.Tests.csproj -c Release -- --native`. The Build workflow runs them without `--native`. They don't start any agent CLI, so also run the app and try the change with a real session. If you touch an agent's profile, say which version of that CLI you ran.
 - Update `README.md` when behavior a user can see changes.
 
 **Changes to another program's config need extra care.** Connect writes to Kimi Code's and Antigravity's global config. Anything it adds must be shown in the Connect preview, be removed by Disconnect, and do nothing in sessions outside Agmen.

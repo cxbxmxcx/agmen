@@ -9,7 +9,8 @@ namespace Agmen.Hosting;
 /// conversation, and where it sat in the tree. <paramref name="Agent"/> is the agent's id.
 /// </summary>
 public sealed record HistoryEntry(Guid TabId, string Agent, string Cwd, string SessionId, string Title, DateTimeOffset ClosedAt,
-                                  Guid? ParentId = null, string? ParentTitle = null, string? Category = null, string? Note = null);
+                                  Guid? ParentId = null, string? ParentTitle = null, string? Category = null, string? Note = null,
+                                  Guid? HandoffId = null);
 
 /// <summary>
 /// Agmen's own record of the sessions it hosted, newest first, in history.json. A tab goes in
@@ -83,7 +84,8 @@ public static class SessionHistory
     }
 
     private static bool Same(HistoryEntry a, HistoryEntry b) =>
-        a.Agent == b.Agent && string.Equals(a.SessionId, b.SessionId, StringComparison.OrdinalIgnoreCase);
+        a.Agent == b.Agent && (string.IsNullOrEmpty(a.SessionId) || string.IsNullOrEmpty(b.SessionId)
+            ? a.TabId == b.TabId && a.HandoffId == b.HandoffId : string.Equals(a.SessionId, b.SessionId, StringComparison.OrdinalIgnoreCase));
 
     private static void Save(List<HistoryEntry> list)
     {

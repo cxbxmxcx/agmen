@@ -30,7 +30,7 @@ public static class HookRunner
         }
 
         var chain = ProcessTree.Ancestry(Environment.ProcessId);
-        bool insideAgmen = chain.Skip(1).Any(n => n.Name.Equals("Agmen", StringComparison.OrdinalIgnoreCase));
+        bool insideAgmen = ControlChannel.NearestHost(chain).HasValue;
         if (insideAgmen)
         {
             var request = new JsonObject
@@ -41,13 +41,14 @@ public static class HookRunner
             };
             try
             {
-                ControlChannel.CallAsync("agmen:hook", request, TimeSpan.FromSeconds(3), chain.Select(n => n.Pid).ToList())
+                ControlChannel.CallHostAsync("agmen:hook", request, TimeSpan.FromSeconds(3))
                     .Wait(TimeSpan.FromSeconds(4));
             }
             catch (Exception) { /* Agmen is busy or closing; the next signal will do */ }
         }
 
-        if (ProbeLog.Enabled)
+        // The owning workspace records hosted signals after validating the helper process.
+        if (ProbeLog.Enabled && !insideAgmen)
             ProbeLog.Write(new JsonObject
             {
                 ["kind"] = "hook",

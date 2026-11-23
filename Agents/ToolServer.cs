@@ -22,8 +22,6 @@ public static class ToolServer
     {
         ["command"] = Exe,
         ["args"] = new JsonArray("--mcp"),
-        // The server must reach this instance's pipe, also for a dev or test copy with its own name.
-        ["env"] = new JsonObject { ["AGMEN_INSTANCE"] = AppPaths.InstanceName },
     };
 
     /// <summary>

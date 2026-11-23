@@ -49,10 +49,15 @@ public partial class WorkspaceWindow
     /// </summary>
     public void OpenPrimary(AgentKind? asAgent = null)
     {
-        if (Primary is { } existing && (asAgent is null || asAgent == existing.Agent))
+        if (Primary is { } existing)
         {
-            if (existing.IsEnded) ResumeTab(existing);
-            FocusTab(existing);
+            if (asAgent is { } other && other != existing.Agent)
+                _ = ContinueFromMenuAsync(existing, other);
+            else
+            {
+                if (existing.IsEnded) ResumeTab(existing);
+                FocusTab(existing);
+            }
             return;
         }
 
@@ -74,42 +79,21 @@ public partial class WorkspaceWindow
             }
         }
 
-        var current = Primary;
-        var children = current is null ? 0 : ChildrenOf(current).Count;
-        // An agent's earlier primary resumes its own conversation rather than starting over.
+        // Reopening a closed primary can resume that agent's last native conversation.
         var previous = SavedPrimarySession(agent) is { } id && CanResume(agent, id) ? id : null;
-        var question = current is not null
-            ? $"Switch the primary session to {name}?\n\n"
-              + $"The {AgentProfiles.DisplayName(current.Agent)} primary stops. Its conversation is kept, and comes back when you switch to it again. "
-              + (children == 0 ? "" : $"The {(children == 1 ? "session" : $"{children} sessions")} under the primary {(children == 1 ? "stays" : "stay")} there, for the new primary to direct. ")
-              + "Your notes in primary-notes.md carry over."
-            : previous is null
-                ? $"Start the primary session as {name}?\n\n"
-                  + $"It's {AgentProfiles.WithArticle(agent)} session of its own at the top of your session tree. It starts and directs child "
-                  + "sessions of any agent when you ask it to, and keeps an eye on all your sessions. "
-                  + $"It uses your {name} plan like any other session."
-                : null;
+        Guid? inherited = _state.PrimaryHandoffs?.TryGetValue(AgentProfiles.Id(agent), out var handoff) == true ? handoff : null;
+        var question = previous is null && inherited is null
+            ? $"Start the primary session as {name}?\n\n"
+              + $"It's {AgentProfiles.WithArticle(agent)} session of its own at the top of your session tree. It starts and directs child "
+              + "sessions of any agent when you ask it to, and keeps an eye on all your sessions. "
+              + $"It uses your {name} plan like any other session."
+            : null;
         if (question is not null && !Confirm(question, "Primary session")) return;
 
-        HostedTab tab;
-        if (current is not null)
-        {
-            // The new primary takes the old one's place and its id, so the sessions under it stay under it.
-            RememberPrimarySession(current);
-            int at = _tabs.IndexOf(current);
-            current.Stop();
-            if (current.Terminal is { } old) TerminalHost.Children.Remove(old);
-            tab = NewPrimaryTab(agent, previous, current.Id);
-            tab.IsCollapsed = current.IsCollapsed;
-            _tabs[at] = tab;
-            Log.Write($"primary: {AgentProfiles.DisplayName(current.Agent)} hands over to {name}");
-        }
-        else
-        {
-            tab = NewPrimaryTab(agent, previous, Guid.NewGuid());
-            _tabs.Insert(0, tab);
-        }
-        if (previous is null) tab.InitialPrompt = PrimarySetup.FirstStartPrompt(agent, children);
+        var tab = NewPrimaryTab(agent, previous, Guid.NewGuid());
+        tab.HandoffId = inherited;
+        if (previous is null) tab.InitialPrompt = inherited.HasValue ? HandoffPrompt() : PrimarySetup.FirstStartPrompt(agent, 0);
+        _tabs.Insert(0, tab);
         _state.PrimaryAgent = AgentProfiles.Id(agent);
         RefreshTree();
         Select(tab);
@@ -118,8 +102,8 @@ public partial class WorkspaceWindow
         Log.Write(previous is null ? $"primary: started as {name}" : $"primary: resuming {name} conversation {previous}");
     }
 
-    private static HostedTab NewPrimaryTab(AgentKind agent, string? sessionId, Guid id) =>
-        new(PrimarySetup.Folder, sessionId, id, "Primary", TabCategory.None, isPrimary: true, agent: agent)
+    private static HostedTab NewPrimaryTab(AgentKind agent, string? sessionId, Guid id, string? cwd = null) =>
+        new(cwd ?? PrimarySetup.Folder, sessionId, id, "Primary", TabCategory.None, isPrimary: true, agent: agent)
         {
             LaunchName = agent == AgentKind.Claude ? PrimarySetup.SessionName : null,
         };
@@ -132,9 +116,12 @@ public partial class WorkspaceWindow
     /// <summary>Keep the primary's conversation under its agent, so that agent's primary can pick it up again.</summary>
     private void RememberPrimarySession(HostedTab primary)
     {
-        if (primary.SessionId is not { } id) return;
-        (_state.PrimarySessions ??= new())[AgentProfiles.Id(primary.Agent)] = id;
-        if (primary.Agent == AgentKind.Claude) _state.PrimarySessionId = id;
+        var agent = AgentProfiles.Id(primary.Agent);
+        if (primary.HandoffId is { } handoff) (_state.PrimaryHandoffs ??= new())[agent] = handoff;
+        else _state.PrimaryHandoffs?.Remove(agent);
+        if (primary.SessionId is { } id) (_state.PrimarySessions ??= new())[agent] = id;
+        else _state.PrimarySessions?.Remove(agent);
+        if (primary.Agent == AgentKind.Claude) _state.PrimarySessionId = primary.SessionId;
     }
 
     /// <summary>
@@ -148,17 +135,6 @@ public partial class WorkspaceWindow
         AgentKind.Kimi => AgentMonitor.KimiSessionDir(sessionId) is not null,
         _ => true,
     };
-
-    /// <summary>Regenerate the primary's folder before each start, so its instructions, notes and MCP config are current.</summary>
-    private void PreparePrimary(HostedTab tab)
-    {
-        try { tab.ExtraArgs = PrimarySetup.Prepare(tab.Agent); }
-        catch (Exception ex)
-        {
-            Log.Write($"primary: setup failed: {ex.Message}");
-            Notice("Couldn't prepare the primary session's folder. See the log.");
-        }
-    }
 
     /// <summary>The agents the primary can run as, for the ★ button and the primary's own menu; the current one is checked.</summary>
     private IEnumerable<MenuItem> PrimaryAgentItems()
@@ -209,7 +185,8 @@ public partial class WorkspaceWindow
     /// </summary>
     private void ReportFinishedTurn(HostedTab tab, OutboxMessage sent, string outcome)
     {
-        if (sent.ReportTo is not { } toId || _tabs.FirstOrDefault(t => t.Id == toId) is not { } to || to == tab || to.IsEnded) return;
+        if (sent.ReportTo is not { } toId || tab.ParentId != toId || sent.CanDeliver?.Invoke() == false
+            || _tabs.FirstOrDefault(t => t.Id == toId) is not { } to || to == tab || to.IsEnded) return;
         if (outcome == "idle" && tab.RepliedToParent && tab.ParentId == to.Id)
         {
             Log.Write($"tree: {tab.Title} already reported to {to.Title}");
@@ -218,7 +195,9 @@ public partial class WorkspaceWindow
         var name = tab.Session?.Info.Name is { Length: > 0 } n ? n : tab.Title;
         var said = Orchestrator.WithoutPrefix(sent.Text).Replace('\n', ' ');
         if (said.Length > 70) said = said[..67] + "...";
-        var reply = Agents.StateOf(tab.Id)?.LastReply is { Length: > 0 } r ? TranscriptDigest.Clip(r.Replace('\n', ' '), 400, keepEnd: false) : null;
+        var state = Agents.StateOf(tab.Id);
+        var reply = state?.StartedAt == tab.StartedAt && state.Agent == tab.Agent && state.LastReply is { Length: > 0 } r
+            ? TranscriptDigest.Clip(r.Replace('\n', ' '), 400, keepEnd: false) : null;
         var text = outcome == "ended"
             ? $"[Agmen] {name} ended while working on your message (\"{said}\")."
             : $"[Agmen] {name} finished the turn your message started (\"{said}\")."
@@ -228,6 +207,7 @@ public partial class WorkspaceWindow
             Text = text,
             Origin = "agmen",
             Key = "report:" + tab.Id,
+            CanDeliver = Agmen.Orchestration.Orchestrator.WatchParentRelationship(_tabs, to, tab),
             MinIdle = TimeSpan.FromSeconds(5),
         });
         Log.Write($"tree: told {to.Title} that {name} {(outcome == "ended" ? "ended" : "finished a turn")}");

@@ -14,7 +14,7 @@
 
             <!-- Header -->
             <DockPanel DockPanel.Dock="Top" Margin="4,0,0,10">
-                <TextBlock Text="Agmen" FontSize="15" FontWeight="SemiBold"
+                <TextBlock x:Name="PanelTitle" Text="Agmen" MaxWidth="145" TextTrimming="CharacterEllipsis" FontSize="15" FontWeight="SemiBold"
                            Foreground="{StaticResource TextPrimary}" VerticalAlignment="Center"/>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="WorkspaceButton" Content="&#x229E;" FontSize="14"

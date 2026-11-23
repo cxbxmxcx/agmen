@@ -49,12 +49,7 @@ public partial class WorkspaceWindow : Window
     public WorkspaceWindow()
     {
         InitializeComponent();
-        Title = AppPaths.InstanceName switch
-        {
-            "Agmen" => "Agmen",
-            "Agmen-dev" => "Agmen (dev)",
-            var other => $"Agmen ({other})",
-        };
+        Title = AppPaths.WorkspaceTitle;
         TabList.ItemsSource = _tabs;
         TabList.ContextMenu = BuildTabMenu();
         _state = WorkspaceStore.Load();
@@ -165,13 +160,23 @@ public partial class WorkspaceWindow : Window
     /// <summary>Resume a Codex, Kimi Code or Antigravity conversation in a new tab.</summary>
     public HostedTab? OpenResumed(AgentKind agent, string cwd, string sessionId, bool select = true)
     {
+        if (TabFor(agent, sessionId) is { } open)
+        {
+            if (select) Select(open);
+            return open;
+        }
+        if (WorkspaceSessions.Current.OtherOwner(agent, sessionId) is { } owner)
+        {
+            Notice($"Open the '{owner}' workspace to resume this conversation.");
+            return null;
+        }
         if (!Directory.Exists(cwd))
         {
             Notice($"Folder not found: {cwd}");
             return null;
         }
         OfferConnect(agent);
-        var tab = new HostedTab(cwd, sessionId, agent: agent);
+        var tab = new HostedTab(cwd, sessionId, agent: agent) { HandoffId = HandoffForNative(agent, sessionId) };
         AddTab(tab, select);
         StartTab(tab);
         return tab;
@@ -186,12 +191,13 @@ public partial class WorkspaceWindow : Window
     {
         var live = SessionMonitor.LiveSessionIds();
         var toOpen = new List<RestoreService.Entry>();
-        int restarted = 0, alreadyHere = 0, elsewhere = 0, missing = 0;
+        int restarted = 0, alreadyHere = 0, elsewhere = 0, missing = 0, otherWorkspace = 0;
         HostedTab? focus = null;
 
         foreach (var e in entries.DistinctBy(x => x.SessionId, StringComparer.OrdinalIgnoreCase))
         {
-            var existing = _tabs.FirstOrDefault(t => Same(t.SessionId, e.SessionId));
+            if (WorkspaceSessions.Current.OtherOwner(AgentKind.Claude, e.SessionId) != null) { otherWorkspace++; continue; }
+            var existing = TabFor(AgentKind.Claude, e.SessionId);
             if (existing is not null)
             {
                 focus ??= existing;
@@ -211,7 +217,7 @@ public partial class WorkspaceWindow : Window
         int index = 0;
         foreach (var e in toOpen)
         {
-            var tab = new HostedTab(e.Cwd, e.SessionId, knownTitle: e.Name);
+            var tab = new HostedTab(e.Cwd, e.SessionId, knownTitle: e.Name) { HandoffId = HandoffForNative(AgentKind.Claude, e.SessionId) };
             AddTab(tab, select: false);
             ScheduleStart(tab, index++);
             focus ??= tab;
@@ -222,6 +228,7 @@ public partial class WorkspaceWindow : Window
         if (toOpen.Count + restarted > 0) parts.Add($"opened {toOpen.Count + restarted}");
         if (alreadyHere > 0) parts.Add($"{alreadyHere} already open here");
         if (elsewhere > 0) parts.Add($"{elsewhere} running in another window");
+        if (otherWorkspace > 0) parts.Add($"{otherWorkspace} belonging to another workspace");
         if (missing > 0) parts.Add($"{missing} with a missing folder");
         if (parts.Count > 0) Notice(string.Join(" · ", parts));
         return toOpen.Count + restarted;
@@ -229,7 +236,17 @@ public partial class WorkspaceWindow : Window
 
     /// <summary>The tab that has this conversation open, if any.</summary>
     public HostedTab? TabFor(AgentKind agent, string sessionId) =>
-        _tabs.FirstOrDefault(t => t.Agent == agent && Same(t.SessionId, sessionId));
+        string.IsNullOrEmpty(sessionId) ? null : _tabs.FirstOrDefault(t => t.Agent == agent && Same(t.SessionId, sessionId));
+
+    private Guid? HandoffForNative(AgentKind agent, string? sessionId, HostedTab? caller = null) =>
+        _state.HandoffForNative(agent, sessionId, caller);
+
+    private void RememberNativeHandoff(HostedTab tab) => _state.RememberNativeHandoff(tab);
+
+    internal HostedTab? TabFor(AgentKind agent, HistoryEntry entry) =>
+        string.IsNullOrEmpty(entry.SessionId)
+            ? _tabs.FirstOrDefault(t => t.Id == entry.TabId && t.Agent == agent && t.HandoffId == entry.HandoffId)
+            : TabFor(agent, entry.SessionId);
 
     private HistoryWindow? _history;
 
@@ -261,7 +278,7 @@ public partial class WorkspaceWindow : Window
         foreach (var e in all)
         {
             if (AgentProfiles.Parse(e.Agent) is not { } agent) continue;
-            if (TabFor(agent, e.SessionId) is { } open)
+            if (TabFor(agent, e) is { } open)
             {
                 ids[e.TabId] = open.Id;
                 first ??= open;
@@ -280,8 +297,11 @@ public partial class WorkspaceWindow : Window
                 : ids.TryGetValue(p, out var reopenedAs) ? reopenedAs
                 : _tabs.Any(t => t.Id == p) ? p : null;
             // The old id, unless a tab has it again, so children that closed with it can find it.
-            var tab = new HostedTab(e.Cwd, e.SessionId, _tabs.Any(t => t.Id == e.TabId) ? null : e.TabId, e.Title,
-                                    TabCategories.Parse(e.Category), agent: agent) { ParentId = parent };
+            var nativeId = string.IsNullOrEmpty(e.SessionId) ? null : e.SessionId;
+            var tab = new HostedTab(e.Cwd, nativeId, _tabs.Any(t => t.Id == e.TabId) ? null : e.TabId, e.Title,
+                                    TabCategories.Parse(e.Category), agent: agent)
+                { ParentId = parent, HandoffId = e.HandoffId ?? HandoffForNative(agent, nativeId) };
+            if (nativeId is null && e.HandoffId.HasValue) tab.InitialPrompt = HandoffPrompt();
             if (e.Note is { Length: > 0 } note) tab.Note = note;
             ids[e.TabId] = tab.Id;
             AddTab(tab, select: false);
@@ -312,7 +332,7 @@ public partial class WorkspaceWindow : Window
     /// <summary>Reopen CLI sessions whose transcripts were active within the window.</summary>
     public int OpenRecent(TimeSpan window)
     {
-        var entries = RestoreService.RecentFromTranscripts(window).Select(r => r.Entry).ToList();
+        var entries = RecentWorkspaceSessions(window).Select(r => r.Entry).ToList();
         if (entries.Count == 0)
         {
             Notice("No sessions were active in that period.");
@@ -344,6 +364,8 @@ public partial class WorkspaceWindow : Window
                 ? NewPrimaryTab(agent, saved.SessionId, saved.Id)
                 : new HostedTab(saved.Cwd, saved.SessionId, saved.Id, saved.Title, TabCategories.Parse(saved.Category), agent: agent);
             tab.Note = saved.Note ?? "";
+            tab.HandoffId = saved.HandoffId ?? HandoffForNative(agent, saved.SessionId);
+            if (saved.HandoffId.HasValue && saved.SessionId is null) tab.InitialPrompt = HandoffPrompt();
             tab.ParentId = saved.IsPrimary ? null : saved.ParentId;
             tab.IsCollapsed = saved.Collapsed;
             tab.LaunchModel = saved.Model;
@@ -403,7 +425,8 @@ public partial class WorkspaceWindow : Window
     public void OfferConnect(AgentKind agent)
     {
         if (!AgentConnect.Connectable.Contains(agent) || _connectOffered.Contains(agent)) return;
-        if (AgentConnect.StateOf(agent) is not (AgentConnect.State.NotConnected or AgentConnect.State.ConnectedElsewhere)) return;
+        if (AgentConnect.StateOf(agent) is not (AgentConnect.State.NotConnected or AgentConnect.State.ConnectedElsewhere
+            or AgentConnect.State.Incomplete)) return;
         _connectOffered.Add(agent);
         RunConnect($"{AgentProfiles.DisplayName(agent)} isn't connected to Agmen yet, so its sessions can't use "
                    + "Agmen's tools: they can't start children or report to a parent."
@@ -486,7 +509,7 @@ public partial class WorkspaceWindow : Window
 
     // ----------------------------------------------------------- tab plumbing
 
-    private void AddTab(HostedTab tab, bool select)
+    internal void AddTab(HostedTab tab, bool select)
     {
         _tabs.Add(tab);
         ReorderTree();
@@ -507,40 +530,51 @@ public partial class WorkspaceWindow : Window
     {
         var watch = Stopwatch.StartNew();
         if (tab.Terminal is { } old) TerminalHost.Children.Remove(old);
-        if (tab.IsPrimary) PreparePrimary(tab);
-        // Every Claude tab gets Agmen's tool server beside the user's own MCP servers, its tools
-        // pre-approved, and Agmen's guide to the tree. The other agents get theirs on their command
-        // line or from Connect. (--allowedTools takes a list, so another option must follow it.)
-        else if (tab.Agent == AgentKind.Claude)
+        try { PrepareAgent(tab); }
+        catch (Exception ex)
         {
-            try
+            Log.Write($"tab {tab.Title}: couldn't prepare the agent configuration: {ex.Message}");
+            if (tab.HandoffId.HasValue)
             {
-                tab.ExtraArgs = new[]
-                {
-                    "--allowedTools", "mcp__agmen", "--mcp-config", ToolServer.ClaudeConfigFile(),
-                    "--append-system-prompt", AgentGuide.Text,
-                };
+                tab.MarkEnded("Could not prepare Agmen's tools for the handoff");
+                Notice($"Couldn't start {tab.Title}: {ex.Message}");
+                UpdateChrome();
+                RequestSave();
+                return;
             }
-            catch (Exception ex) { Log.Write($"tab {tab.Title}: couldn't write the tool server config: {ex.Message}"); }
+            if (tab.IsPrimary) Notice("Couldn't prepare the primary session's folder. See the log.");
         }
         // Kimi Code and Antigravity get Agmen's tools only when connected to this copy. A session
         // that starts without them says so on its card, however it was started.
         tab.ToolsMissing = AgentConnect.ToolsMissingReason(tab.Agent);
         if (tab.ToolsMissing is { } missing) Log.Write($"tab {tab.Title}: starting without Agmen's tools: {missing}");
         long prepared = watch.ElapsedMilliseconds;
-        var ctl = tab.Start();
-        if (ctl is not null)
-        {
-            // Hidden rather than collapsed: background tabs keep their real size, so the
-            // pseudo-console starts at the right width and resizes along with the window.
-            ctl.Visibility = tab == SelectedTab ? Visibility.Visible : Visibility.Hidden;
-            TerminalHost.Children.Add(ctl);
-            if (tab == SelectedTab) FocusSelectedTerminalSoon();
-        }
+        if (tab.Start() is not null) AttachTerminal(tab);
         UpdateChrome();
         RequestSave();
         if (watch.ElapsedMilliseconds > 400)
             Log.Write($"tab {tab.Title}: starting took {watch.ElapsedMilliseconds} ms (setup {prepared} ms)");
+    }
+
+    private static void PrepareAgent(HostedTab tab)
+    {
+        if (tab.HandoffId.HasValue) RequireHandoffTarget(tab.Agent, tab.Cwd);
+        if (tab.IsPrimary) tab.ExtraArgs = Agmen.Orchestration.PrimarySetup.Prepare(tab.Agent);
+        else if (tab.Agent == AgentKind.Claude)
+            tab.ExtraArgs = new[]
+            {
+                "--allowedTools", "mcp__agmen", "--mcp-config", ToolServer.ClaudeConfigFile(),
+                "--append-system-prompt", AgentGuide.Text,
+            };
+    }
+
+    private void AttachTerminal(HostedTab tab)
+    {
+        var ctl = tab.Terminal!;
+        // Hidden background terminals keep their real size for the pseudo-console.
+        ctl.Visibility = tab == SelectedTab ? Visibility.Visible : Visibility.Hidden;
+        TerminalHost.Children.Add(ctl);
+        if (tab == SelectedTab) FocusSelectedTerminalSoon();
     }
 
     /// <summary>Stagger restores so a dozen Claude processes do not all start in the same instant.</summary>
@@ -585,7 +619,11 @@ public partial class WorkspaceWindow : Window
         if (!_tabs.Contains(tab) || tab.State is not (TabState.Running or TabState.Starting)) return;
         Log.Write($"tab {tab.Title}: restarting");
         // The conversation must not be open in the old process and the new one at once.
-        await tab.StopForRestartAsync(TimeSpan.FromSeconds(5));
+        if (!await tab.StopForRestartAsync(TimeSpan.FromSeconds(5)))
+        {
+            Notice($"Couldn't confirm '{tab.Title}' stopped. Check the session before restarting it.");
+            return;
+        }
         if (_tabs.Contains(tab)) StartTab(tab);
     }
 
@@ -639,10 +677,10 @@ public partial class WorkspaceWindow : Window
         if (tab.IsPrimary) RememberPrimarySession(tab);
 
         // Closed sessions go into the history with their place in the tree, to be reopened later.
-        var closed = below.Prepend(tab).Where(t => !t.IsPrimary && t.SessionId is not null)
-            .Select(t => new HistoryEntry(t.Id, AgentProfiles.Id(t.Agent), t.Cwd, t.SessionId!, t.Title, DateTimeOffset.Now,
+        var closed = below.Prepend(tab).Where(t => !t.IsPrimary && (t.SessionId is not null || t.HandoffId.HasValue))
+            .Select(t => new HistoryEntry(t.Id, AgentProfiles.Id(t.Agent), t.Cwd, t.SessionId ?? "", t.Title, DateTimeOffset.Now,
                                           t.ParentId, ParentOf(t)?.Title, t.HasCategory ? t.Category.ToString() : null,
-                                          t.HasNote ? t.Note : null))
+                                          t.HasNote ? t.Note : null, t.HandoffId))
             .ToList();
         int index = _tabs.IndexOf(tab);
         // The deepest sessions go first, so none is left without its parent even for a moment.
@@ -658,6 +696,7 @@ public partial class WorkspaceWindow : Window
 
         void Remove(HostedTab t)
         {
+            RememberNativeHandoff(t);
             t.Stop();
             if (t.Terminal is { } ctl) TerminalHost.Children.Remove(ctl);
             _tabs.Remove(t);
@@ -704,6 +743,45 @@ public partial class WorkspaceWindow : Window
         _tabs.Where(t => t.Agent != AgentKind.Claude && t.State is TabState.Starting or TabState.Running)
              .Select(t => t.AgentRef()).ToList();
 
+    internal static List<RestoreService.RecentSession> RecentWorkspaceSessions(TimeSpan window)
+    {
+        var scope = WorkspaceSessions.Current;
+        return RestoreService.RecentFromTranscripts(window, id => scope.Visible(AgentKind.Claude, id));
+    }
+
+    private string? HandoffTranscript(HostedTab tab)
+    {
+        // SessionId here comes from a matched Claude registry entry, an explicit resume,
+        // a turn hook, or Kimi's process lock. A guessed same-folder session cannot set it.
+        var state = Agents.StateOf(tab.Id);
+        if (state?.StartedAt != tab.StartedAt || state.Agent != tab.Agent) state = null;
+        string? id = state?.SessionId ?? tab.SessionId;
+        if (id != null && !WorkspaceSessions.Current.Visible(tab.Agent, id))
+            throw new InvalidOperationException("The conversation has not been associated with this workspace.");
+        string? path = state?.Transcript ?? (id == tab.SessionId ? tab.ConfirmedTranscript : null);
+        if (path is null && id is not null)
+            path = tab.Agent switch
+            {
+                AgentKind.Claude => RestoreService.FindTranscriptPath(id, tab.Cwd),
+                AgentKind.Codex => AgentMonitor.FindCodexFile(id),
+                AgentKind.Kimi when AgentMonitor.KimiSessionDir(id) is { } session =>
+                    Path.Combine(session.Dir, "agents", "main", "wire.jsonl"),
+                AgentKind.Antigravity => AgentMonitor.AntigravityTranscript(id),
+                _ => null
+            };
+        if (path is null && tab.Agent == AgentKind.Kimi && AgentMonitor.KimiSessionForProcess(tab.Cwd, tab.CurrentPid) is { } owned)
+        {
+            WorkspaceSessions.Current.Claim(AgentKind.Kimi, owned.Id);
+            path = Path.Combine(owned.Dir, "agents", "main", "wire.jsonl");
+        }
+        if (path != null && File.Exists(path)) return path;
+        if (path == null && id == null && !tab.HasConversationInput && !tab.IsBusy
+            && tab.Session?.Info.OutputTokens is not > 0 && state?.TurnsCompleted is not > 0) return null;
+        if (tab.Agent == AgentKind.Claude && id != null && tab.ResumeId == null && !tab.HasConversationInput
+            && tab.IsRunning && !tab.IsBusy && tab.Session?.Info.LastActivity == null) return null;
+        throw new InvalidOperationException($"The recorded {AgentProfiles.DisplayName(tab.Agent)} conversation isn't available for this tab yet. Let the agent finish a turn and try again.");
+    }
+
     /// <summary>
     /// Called after every poll: match Claude tabs to their registry entries by process id and
     /// the other tabs to what the agent monitor found, follow status changes, and raise an
@@ -724,27 +802,38 @@ public partial class WorkspaceWindow : Window
             var stateBefore = tab.State;
             string? alert = tab.Poll() ? "ended" : null;
             // agy refuses to run the agmen agent in this new session: start it again as agy's default agent.
-            if (tab.Agent == AgentKind.Antigravity && Agents.StateOf(tab.Id) is { AgentRefused: true } && tab.TakeAgentRefusal())
+            if (tab.Agent == AgentKind.Antigravity && Agents.AgentRefused(tab.Id) && tab.TakeAgentRefusal())
             {
                 RestartAsDefaultAgent(tab);
                 continue;
             }
             SessionInfo? info = null;
+            var currentPid = tab.CurrentPid;
             if (tab.Agent != AgentKind.Claude)
             {
-                if (tab.IsRunning && agentInfos is not null && agentInfos.TryGetValue(tab.Id, out var agentInfo)) info = agentInfo;
+                if (tab.IsRunning && currentPid > 0 && agentInfos is not null && agentInfos.TryGetValue(tab.Id, out var agentInfo)
+                    && agentInfo.StartedAt.LocalDateTime == tab.StartedAt && agentInfo.Pid == currentPid
+                    && agentInfo.Entrypoint == AgentProfiles.Id(tab.Agent)) info = agentInfo;
             }
-            else if (tab.Pid > 0) byPid.TryGetValue(tab.Pid, out info);
+            else if (tab.IsRunning && currentPid > 0) byPid.TryGetValue(currentPid, out info);
             if (info is not null)
             {
+                var previousActivity = tab.Session?.Info.LastActivity;
+                if (info.SessionId.Length > 0 && !Same(idBefore, info.SessionId)) tab.ConfirmedTranscript = null;
                 alert ??= tab.UpdateFrom(info);
+                var state = Agents.StateOf(tab.Id);
+                tab.BindConfirmedSession(state);
+                if (tab.Agent == AgentKind.Claude && info.SessionId.Length > 0 && tab.ConfirmedTranscript == null
+                    && info.LastActivity != null && previousActivity != info.LastActivity)
+                    tab.ConfirmedTranscript = RestoreService.FindTranscriptPath(info.SessionId, tab.Cwd);
                 maxOutput = Math.Max(maxOutput, info.OutputTokens);
                 // Typed text must reach the prompt, not a question whether to trust the folder.
                 // Nor, for Codex, one of its startup questions, which it also asks when it resumes:
                 // it starts Agmen's tool server only once it is past them.
                 if (tab.Agent != AgentKind.Claude && !tab.AgentReady)
                     tab.AgentReady = (tab.Agent != AgentKind.Codex || tab.ToolServerSeen)
-                                     && (Agents.StateOf(tab.Id) is { TurnsCompleted: > 0 } || AgentMonitor.Trusts(tab.Agent, tab.Cwd));
+                                     && (state is { TurnsCompleted: > 0 } && state.StartedAt == tab.StartedAt
+                                         || AgentMonitor.Trusts(tab.Agent, tab.Cwd));
             }
             else tab.Refresh();
             if (tab.TakeTrustQuestion()) alert ??= "trust";
@@ -801,7 +890,7 @@ public partial class WorkspaceWindow : Window
 
         if (tab is null)
         {
-            HeaderTitle.Text = AppPaths.IsDev ? "Agmen (dev)" : "Agmen";
+            HeaderTitle.Text = AppPaths.WorkspaceTitle;
             HeaderDetail.Text = "Ctrl+Shift+T new session   ·   Ctrl+Tab next tab";
         }
         else
@@ -945,7 +1034,8 @@ public partial class WorkspaceWindow : Window
     {
         if (vk is VK_SHIFT or VK_CONTROL or VK_MENU or 0x14 or 0x5B or 0x5C or (>= 0xA0 and <= 0xA5) or 0x1B)
             return;
-        tab.NoteUserKey(clearsInput: vk == 0x0D && !newLine);
+        bool submitted = vk == 0x0D && !newLine;
+        tab.NoteUserKey(clearsInput: submitted, submitted: submitted);
     }
 
     // ----------------------------------------------------------- buttons and menus
@@ -1055,9 +1145,8 @@ public partial class WorkspaceWindow : Window
             sameFolder.Items.Add(item);
         }
         menu.Items.Add(sameFolder);
-        // On the primary's own card: which agent runs it.
-        var primaryAs = new MenuItem { Header = "Run the primary session as" };
-        menu.Items.Add(primaryAs);
+        AddHandoffMenuItems(menu);
+        AddSiblingSharingMenu(menu);
         AddTreeMenuItems(menu);
         menu.Items.Add(new Separator());
         Item("Open folder in Explorer", t => OpenFolder(t.Cwd));
@@ -1085,10 +1174,6 @@ public partial class WorkspaceWindow : Window
             restart.IsEnabled = t is { State: TabState.Running or TabState.Starting };
             restartTree.Visibility = t is not null && ChildrenOf(t).Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             copyId.IsEnabled = t?.SessionId is not null;
-            primaryAs.Visibility = t is { IsPrimary: true } ? Visibility.Visible : Visibility.Collapsed;
-            primaryAs.Items.Clear();
-            if (t is { IsPrimary: true })
-                foreach (var item in PrimaryAgentItems()) primaryAs.Items.Add(item);
             deliver.Visibility = discard.Visibility = queueSeparator.Visibility =
                 t is { HasQueued: true } ? Visibility.Visible : Visibility.Collapsed;
         };
@@ -1136,7 +1221,7 @@ public partial class WorkspaceWindow : Window
 
     // ----------------------------------------------------------- persistence and shutdown
 
-    private void RequestSave()
+    internal void RequestSave()
     {
         _saveTimer.Stop();
         _saveTimer.Start();
@@ -1146,10 +1231,11 @@ public partial class WorkspaceWindow : Window
     public void SaveNow()
     {
         _saveTimer.Stop();
+        foreach (var tab in _tabs) RememberNativeHandoff(tab);
         _state.Tabs = _tabs.Select(t => new SavedTab(
             t.Id, t.Cwd, t.SessionId, t.IsPrimary ? null : t.Title, t.IsEnded, t.HasCategory ? t.Category.ToString() : null,
             t.IsPrimary, t.HasNote ? t.Note : null, t.Agent == AgentKind.Claude ? null : AgentProfiles.Id(t.Agent),
-            t.ParentId, t.IsCollapsed, t.LaunchModel, t.LaunchEffort)).ToList();
+            t.ParentId, t.IsCollapsed, t.LaunchModel, t.LaunchEffort, t.HandoffId)).ToList();
         if (Primary is { } primary)
         {
             RememberPrimarySession(primary);
@@ -1215,7 +1301,7 @@ public partial class WorkspaceWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        if (AppPaths.IsDev) return;   // the release copy owns the hotkey
+        if (!AppPaths.OwnsGlobalHotkeys) return;
         var handle = new WindowInteropHelper(this).Handle;
         HwndSource.FromHwnd(handle)?.AddHook(WndProc);
         if (!RegisterHotKey(handle, HotkeyId, 0x2 | 0x1, VK_W)) Log.Write("Ctrl+Alt+W is taken by another app");

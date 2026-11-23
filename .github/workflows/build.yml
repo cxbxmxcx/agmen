@@ -22,6 +22,15 @@ jobs:
       - name: Build
         run: dotnet build Agmen.csproj -c Release
 
+      - name: Conversation regression checks
+        run: dotnet run --project Tests/Agmen.Tests.csproj -c Release
+
       - name: Publish and check the release build
         shell: pwsh
         run: ./publish.ps1 -NoZip
+
+      - name: Build and exercise the per-user installer
+        shell: pwsh
+        run: |
+          ./installer/build.ps1 -AppDir out/Agmen -OutDir out
+          ./installer/check.ps1 -Setup out/Agmen-Setup-x64.exe -PublishedApp out/Agmen

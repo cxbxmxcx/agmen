@@ -26,7 +26,7 @@ public sealed class SessionMonitor
         _projectsDir = Path.Combine(home, ".claude", "projects");
     }
 
-    public List<SessionInfo> Snapshot()
+    public List<SessionInfo> Snapshot(Func<SessionInfo, bool>? include = null)
     {
         var result = new List<SessionInfo>();
         if (!Directory.Exists(_sessionsDir)) return result;
@@ -34,7 +34,7 @@ public sealed class SessionMonitor
         foreach (var file in Directory.EnumerateFiles(_sessionsDir, "*.json"))
         {
             SessionInfo? info = TryParseRegistryFile(file);
-            if (info is null || !IsProcessAlive(info)) continue;
+            if (info is null || !IsProcessAlive(info) || include?.Invoke(info) == false) continue;
             EnrichWithUsage(info);
             (info.GitBranch, info.GitCommit) = GitInfoReader.Read(info.Cwd);
             result.Add(info);
@@ -82,7 +82,7 @@ public sealed class SessionMonitor
     /// session id is unknown, so callers should be careful about resuming
     /// sessions that may already be open.
     /// </summary>
-    public int UnregisteredLiveCount()
+    public int UnregisteredLiveCount(Func<int, bool>? include = null)
     {
         if (!Directory.Exists(_sessionsDir)) return 0;
         var registered = new HashSet<int>();
@@ -93,7 +93,7 @@ public sealed class SessionMonitor
         foreach (var f in Directory.EnumerateFiles(_sessionsDir, "*.key"))
         {
             var first = Path.GetFileName(f).Split('.')[0];
-            if (!int.TryParse(first, out var pid) || registered.Contains(pid)) continue;
+            if (!int.TryParse(first, out var pid) || registered.Contains(pid) || include?.Invoke(pid) == false) continue;
             try
             {
                 using var proc = Process.GetProcessById(pid);

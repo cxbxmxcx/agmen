@@ -25,10 +25,6 @@ public static class LoginEnvironment
         "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL", "PROCESSOR_REVISION",
         "NUMBER_OF_PROCESSORS", "DriverData", "PSModulePath", "OneDrive", "OneDriveCommercial", "OneDriveConsumer",
         "TEMP", "TMP",
-        // Not a logon variable, but every process under a tab needs it: the hook commands Codex and
-        // Antigravity run find this copy's pipe by its instance name, and a copy named with
-        // AGMEN_INSTANCE would otherwise have its hooks talk to the default copy.
-        "AGMEN_INSTANCE",
     };
 
     public static (int Removed, int Kept) Apply()
@@ -52,6 +48,14 @@ public static class LoginEnvironment
             foreach (var key in Volatile)
                 if (!target.ContainsKey(key) && Environment.GetEnvironmentVariable(key) is { } v)
                     target[key] = v;
+
+            // Workspace identity belongs to this host. A user's logon default can differ
+            // when the window was opened from a shortcut or the workspace picker.
+            foreach (var key in new[] { "AGMEN_INSTANCE", "AGMEN_WORKSPACE_FAMILY", "AGMEN_WORKSPACE_NAME" })
+            {
+                if (Environment.GetEnvironmentVariable(key) is { } value) target[key] = value;
+                else target.Remove(key);
+            }
 
             int removed = 0;
             foreach (DictionaryEntry e in Environment.GetEnvironmentVariables())

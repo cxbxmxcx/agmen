@@ -1,6 +1,6 @@
 <h1 align="center">Agmen</h1>
 
-<p align="center"><strong>One Windows workspace for Claude Code, Codex, Kimi Code and Antigravity, where sessions start, direct and answer each other as a tree.</strong></p>
+<p align="center"><strong>Windows workspaces for Claude Code, Codex, Kimi Code and Antigravity, where sessions start, direct and answer each other as a tree.</strong></p>
 
 <p align="center">
   <a href="https://github.com/cxbxmxcx/agmen/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/cxbxmxcx/agmen?label=release"></a>
@@ -24,6 +24,7 @@ Each tab runs the real CLI, signed in as you, in Windows Terminal's own terminal
 - [Quick start](#quick-start)
 - [Requirements](#requirements)
 - [What Agmen does](#what-agmen-does)
+- [Run multiple workspaces](#run-multiple-workspaces)
 - [A tour of the workspace](#a-tour-of-the-workspace)
 - [Keyboard shortcuts](#keyboard-shortcuts)
 - [Configuration](#configuration)
@@ -41,15 +42,18 @@ Each tab runs the real CLI, signed in as you, in Windows Terminal's own terminal
 
 1. **Install at least one agent CLI and sign in to it.** Agmen runs the ones it finds on your PATH. [Requirements](#requirements) lists them.
 
-2. **Install Agmen.** In PowerShell:
+2. **Install Agmen.** Download `Agmen-Setup-x64.exe` from the release assets and double-click it. Setup includes the runtime, installs under `%LOCALAPPDATA%\Programs\Agmen` for your Windows account and adds Agmen to Start. Choose whether it starts at sign-in. To update, finish your work, exit the workspaces running from that installation and run the new setup. [Agmen releases](https://github.com/cxbxmxcx/agmen/releases)
+
+   For a scripted installation, run these commands in PowerShell.
 
    ```powershell
-   irm https://github.com/cxbxmxcx/agmen/releases/latest/download/install.ps1 -OutFile "$env:TEMP\agmen-install.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\agmen-install.ps1"
+   irm https://github.com/cxbxmxcx/agmen/releases/latest/download/install.ps1 -OutFile "$env:TEMP\agmen-install.ps1"
+   powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\agmen-install.ps1"
    ```
 
-   This downloads the latest release, checks it against the release's SHA-256, installs it to `%LOCALAPPDATA%\Programs\Agmen`, adds Start menu and sign-in shortcuts, and starts Agmen. It needs no administrator rights and no .NET install. Run it again to update.
+   The script downloads the installer, verifies its published SHA-256 checksum, installs it and opens Agmen. Earlier releases install from their portable zip.
 
-   **Or by hand:** download [`Agmen-win-x64.zip`](https://github.com/cxbxmxcx/agmen/releases/latest/download/Agmen-win-x64.zip), extract the whole folder anywhere, and run `Agmen.exe`. The exe isn't code-signed, so Windows SmartScreen may warn the first time: choose **More info**, then **Run anyway**.
+   For a portable copy, extract the entire zip into its own folder and run `Agmen.exe`. [Portable Windows zip](https://github.com/cxbxmxcx/agmen/releases/latest/download/Agmen-win-x64.zip)
 
 3. **Start a session.** The workspace opens on first run. Click **+ New session ▾**, pick an agent, then pick a folder. The agent starts in a new tab.
 
@@ -61,7 +65,7 @@ Each tab runs the real CLI, signed in as you, in Windows Terminal's own terminal
 
    The two sessions appear under the primary in the tree, do the work, and report back to it. You can also ask any session to start a child, or right-click its card and choose **New child session**.
 
-| Installer option | Effect |
+| PowerShell installer option | Effect |
 |---|---|
 | `-Version v0.1.0` | Install that release, not the latest |
 | `-NoStartup` | Don't start Agmen when you sign in to Windows |
@@ -70,7 +74,7 @@ Each tab runs the real CLI, signed in as you, in Windows Terminal's own terminal
 | `-ZipPath <file>` | Install from a zip you already have |
 | `-Uninstall` | Remove Agmen and its shortcuts; your settings and saved tabs stay |
 
-Add options after `agmen-install.ps1"` in the command above.
+Add options after `agmen-install.ps1"` in the command above. For unattended installation using the downloaded executable, use `Agmen-Setup-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`. Add `/TASKS="!startup"` to disable the sign-in shortcut. Silent setup leaves launching the app to you.
 
 ## Requirements
 
@@ -103,11 +107,14 @@ Agmen was last run with Claude Code 2.1.329, Codex 0.167 and 0.171, Kimi Code 2.
 <p align="center"><img src="docs/images/child-report.png" width="900" alt="Two child sessions report to the primary session while a Codex session is still working"></p>
 
 - **Sessions form a tree.** A session's children sit indented under its card. Fold them away with the ▾ on the card, or move a session under another from its menu.
-- **Parents direct only their own children.** Every session gets these tools:
+- **Tree tools.** Every hosted session can use these MCP tools.
 
   | Tool | What it does |
   |---|---|
-  | `spawn_child` | Starts a child session of any agent, in a folder, with its first task. Optional: a name, a color, a model, an effort, or an earlier conversation to resume |
+  | `spawn_child` | Starts a child with its first task. Set `inherit_context: true` to fork the caller's conversation. Use `resume_session_id` separately to reopen a native session |
+  | `read_handoff` | Reads the history the calling tab inherited. Start at offset zero and use each page's `next_offset` until `end` is true |
+  | `list_siblings` | Lists the caller's siblings when their shared parent is a top-level tab |
+  | `message_sibling` | Sends supplied text to one sibling by tab ID or unique full name |
   | `message_child` | Sends a child a message |
   | `read_child` | Reads what a child has been doing, from its own records, without interrupting it |
   | `list_children` | Lists a session's children with their status and queued messages |
@@ -116,22 +123,34 @@ Agmen was last run with Claude Code 2.1.329, Codex 0.167 and 0.171, Kimi Code 2.
   | `whoami` | Says where the session is in the tree |
   | `list_projects` | Finds local project folders |
 
-- **Agmen knows who is calling.** It finds the calling tab from the process tree of the tool call, so a session can act only on its own children, whatever it claims.
+- **Agmen knows who is calling.** It identifies the calling tab from the tool server's process tree and checks the live family relationship before routing a message.
 - **Reports come back on their own.** When a child finishes a turn its parent started, Agmen tells the parent, with the start of the child's reply. A child that already reported with `message_parent` gets no second note.
 - **Closing a session closes everything under it.** Agmen asks first. The conversations stay saved, so you can reopen them from the session history, as a subtree.
 - **Limits keep a tree from running away.** Children nest at most 4 levels below a top-level session. A session has at most 12 running children, starts at most 12 an hour, and holds at most 10 undelivered messages.
+
+### Continue or fork a conversation
+
+Right-click a tab's card and choose **Continue with another agent**. Pick the agent and confirm. The new CLI starts a fresh native session in the same folder and keeps the tab's place in the tree, including its children. Finish any active turn, answer pending prompts and send or clear any draft first.
+
+Choose **Fork as child with context** on the card to keep working in the source tab and give a new child the conversation so far. The child can use the same agent or another one. Later turns stay in their respective sessions. **New child session** and ordinary `spawn_child` start fresh by default.
+
+Both actions carry forward recorded user and assistant messages, tool calls and results, and any previously inherited history. The new agent reads the snapshot in pages with `read_handoff`. Attachments appear as markers. Agmen skips private reasoning, system records and recognized credential fields in structured tool data. The amount of tool output available depends on what the source CLI recorded.
+
+### Share an excerpt with a sibling
+
+On a child card directly under a top-level tab, choose **Share with sibling…**. Select another active child of that same parent. The compose box starts with any text you selected in the source terminal. Edit it, type a message, or paste an excerpt, then choose **Share**. The recipient gets that text with a **[From your sibling, …]** label when its prompt can accept it. For example, two children working on a fix and its tests can exchange the failing test name and error. Their conversation histories stay separate.
 
 ### The primary session
 
 - **Any agent can run it.** The primary is a session pinned at the top of the tree. Claude Code, Codex, Kimi Code or Antigravity can run it: **★** asks which one the first time.
 - **An overview of everything.** Besides the tools every session has, the primary can:
-  - list every session, including Claude Code sessions running outside Agmen (`list_sessions`);
+  - list the sessions in its workspace, including external Claude Code sessions in Default (`list_sessions`);
   - read what any of them has been doing without interrupting it (`read_session`);
   - bring one to the front (`focus_session`);
   - send you a Windows notification (`notify`).
 - **Directs its own children.** It starts children in the right folder, gives each a self-contained task, color-codes them and keeps a one-line summary on their cards. A session you started by hand isn't its to direct unless you move it under the primary.
 - **Asks before anything leaves the machine.** Its standing rules forbid pushes, merges, branch deletions, releases and changes to remote services without your OK in its conversation. They also tell it never to answer another session's permission prompt for you.
-- **Switch agents without losing the tree.** Right-click **★**, or use **Run the primary session as** on the **+** menu or on the primary's card. The new primary takes the old one's place, so the sessions under it stay under it. Each agent keeps its own primary conversation, which resumes when you switch back.
+- **Continue the primary with another agent.** Right-click **★**, or use **Run the primary session as** on the **+** menu or on the primary's card. Switching an open primary carries its recorded conversation into the new agent and keeps its children in place.
 - **Yours to tune.** Add standing instructions to `primary-notes.md` in `%APPDATA%\Agmen\primary`. Agmen never overwrites that file, and every agent's primary gets it.
 
 <p align="center"><img src="docs/images/primary-agent.png" width="450" alt="The star button's menu: run the primary session as Claude Code, Codex, Kimi Code or Antigravity"></p>
@@ -145,7 +164,7 @@ Each agent's primary gets the same instructions, in the file that agent reads fr
 - **Typed in, like you would.** Agmen delivers a message by pasting it into the receiving session's prompt and pressing Enter. That works for every agent.
 - **Only when it's safe.** A message goes in only when the session is idle, isn't waiting on you, isn't asking whether to trust its folder, and you have nothing half-typed in that tab. Until then it waits in a queue.
 - **A badge shows what's waiting.** A ✉ badge on the card counts queued messages. Hover over it to see why they're held. The card's menu can type the next one now, or discard them.
-- **Labeled.** Messages arrive as `[From your parent, <name>]` or `[From your child, <name>]`, and Agmen's own notes as `[Agmen]`. Anything without a label is you.
+- **Labeled.** Messages identify their sender with `[From your parent, <name>]`, `[From your child, <name>]` or `[From your sibling, <name>]`. Agmen's own notes start with `[Agmen]`.
 - **No approval prompts for Agmen's own tools.** They are pre-approved for every agent, and only they are.
 
 ### Status, colors and alerts
@@ -163,6 +182,7 @@ Each agent's primary gets the same instructions, in the file that agent reads fr
 - **Never open twice.** A Claude Code conversation that's open in another window isn't resumed a second time.
 - **Closing the window only hides it.** Your sessions keep running. **Exit** in the tray menu stops them, and they resume on the next start.
 - **Session history.** **Ctrl+Shift+H** lists the sessions you closed in Agmen, with their place in the tree, and every agent's sessions from the past week, including ones started elsewhere. Reopen one, or a whole subtree that closed together.
+- **Inherited history follows its tab.** Workspace restore and reopening a saved Agmen session reconnect the tab to its handoff. Sibling access follows its current place in the restored tree.
 - **Restart a session.** **↻ Restart** or **Ctrl+Shift+R** stops an agent and starts it again on the same conversation, for a stuck session or one that should pick up new settings. For an ended session, the same button resumes it.
 
 ### Agent settings
@@ -189,7 +209,20 @@ A remote server that needs a sign-in needs one in each agent:
 
 ### The session panel
 
-A small always-on-top panel lists every running Claude Code session on the PC, including ones in Windows Terminal, VS Code or the Claude desktop app. Click a card to open its tab, or to bring the window hosting it to the front. The tray icon's dot shows the busiest state: amber when any session is working, green when none is. The panel can also restore the Claude Code sessions that were running before a reboot, and save and reopen a set of sessions.
+The floating panel lists the workspace's running Claude Code sessions. Default also shows sessions launched outside Agmen, including Windows Terminal and VS Code. Click a card to focus that session. The tray dot turns amber when a listed session is working. The panel can save a set of sessions and reopen it after a reboot.
+
+## Run multiple workspaces
+
+Open **Workspaces ▾ → New workspace…** in the sidebar, enter a name such as **Research**, and open it. It gets a separate window and tray icon. Choose a saved name from the sidebar or tray to return to it. Choosing an already open workspace brings its window forward.
+
+Each workspace keeps its own tabs, primary session, settings, closed-session history and conversation handoffs. Closing the workspace window hides it in the tray. **Exit** in its tray menu stops that workspace's sessions. Two workspaces can use the same project folder. A managed native conversation resumes in the workspace that owns it.
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Agmen\Agmen.exe" --workspace "Research"
+& "$env:LOCALAPPDATA\Programs\Agmen\Agmen.exe" --workspace "Writing"
+```
+
+Your existing installed workspace is **Default**, and its files stay in `%APPDATA%\Agmen`. Named workspaces store their files under `%APPDATA%\Agmen\workspaces`. The global shortcuts open Default. All workspaces use the agent CLIs and sign-ins on your Windows account.
 
 ## A tour of the workspace
 
@@ -237,7 +270,7 @@ Without Connect, a Kimi Code or Antigravity tab still runs, but its session can'
 
 ## Configuration
 
-Most settings have a place in the app. Everything Agmen stores is in `%APPDATA%\Agmen`:
+The following paths are relative to the workspace's data folder.
 
 | What | Where | How to change it |
 |---|---|---|
@@ -249,6 +282,7 @@ Most settings have a place in the app. Everything Agmen stores is in `%APPDATA%\
 | Notifications | `workspace.json` | **Notify me when a session needs me** in the tray menu |
 | Tabs, tree, colors, summaries, window position | `workspace.json` | Saved as you work |
 | Sessions you closed | `history.json` | **Session history** |
+| Saved conversation handoffs | `conversation-history\` | Created when you fork with context or continue with another agent |
 | The log | `agmen.log` | Read it when something goes wrong |
 
 **A second copy with its own data.** Set the environment variable `AGMEN_INSTANCE` to a name such as `Agmen-test` before starting Agmen. That copy gets its own data folder (`%APPDATA%\Agmen-test`), its own single-instance lock and its own tool pipe, beside the copy you use.
@@ -258,13 +292,14 @@ Most settings have a place in the app. Everything Agmen stores is in `%APPDATA%\
 | Argument | Effect |
 |---|---|
 | `--workspace` | Show the workspace, also when Agmen is already running |
+| `--workspace "Research"` | Create, reopen, or focus the named workspace |
 | `--open <folder>` | Start a new Claude Code tab in that folder |
 | `--open-agent <agent> <folder>` | Start a new tab of `codex`, `kimi` or `antigravity` in that folder |
 | `--resume <session id>` | Reopen a Claude Code conversation |
 | `--mcp` | The agents in Agmen's tabs run this as Agmen's tool server |
 | `--hook <agent> <event>` | Codex and Antigravity run this to tell Agmen when a turn starts or ends |
 
-`--open`, `--open-agent` and `--resume` can repeat, and take effect when Agmen starts. A second launch only brings the running copy forward.
+`--open`, `--open-agent` and `--resume` can repeat when starting a workspace. Launching the same workspace again focuses its existing window.
 
 ## Build from source
 
@@ -284,7 +319,11 @@ dotnet build -c Release
 - a purple-ringed tray icon;
 - no global shortcut keys, which stay with your release copy.
 
-**Package a build.** `.\publish.ps1` makes what a release ships: `out\Agmen`, a folder that runs without .NET installed, and `out\Agmen-win-x64.zip`. Keep the folder together: `conpty.dll`, `x64\OpenConsole.exe` and `Microsoft.Terminal.Control.dll` must stay beside `Agmen.exe`.
+**Check conversation behavior.** Run `dotnet run --project Tests/Agmen.Tests.csproj -c Release`. On a Windows desktop, append `-- --native` to also check terminal startup, handoffs and sharing with local test processes.
+
+With all four CLIs installed, run `dotnet run --project Tests/Agmen.Tests.csproj -c Release -- --native --real-providers` to check real terminal input and output. The test opens two temporary workspaces with redirected launcher streams. In each tab it moves the selection in a startup menu or types an unsubmitted marker and checks the response on screen.
+
+**Package a build.** `.\publish.ps1` produces `out\Agmen-Setup-x64.exe`, `out\Agmen-win-x64.zip` and SHA-256 checksum files for both. The first installer build downloads a pinned Inno Setup compiler and verifies its checksum. You can supply a local compiler with `-CompilerPath`. For a folder-only build, use `-NoZip` and run `out\Agmen\Agmen.exe` with its native terminal files alongside it.
 
 **Release.** Update `<Version>` in `Agmen.csproj`, optionally add notes as `docs/releases/vX.Y.Z.md`, then tag and push:
 
@@ -293,7 +332,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-The **Release** workflow runs `publish.ps1` on a GitHub Windows runner and publishes the release with the zip, its SHA-256 and `install.ps1`. Running the workflow by hand builds the zip as a downloadable artifact without publishing anything.
+The **Release** workflow runs `publish.ps1` on a GitHub Windows runner. A version tag publishes the installer, zip, checksums and `install.ps1`. A manual run makes the packages available as workflow artifacts.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has a map of the code.
 
@@ -305,8 +344,8 @@ No. It runs the CLIs you installed, signed in as you. Every session uses that ag
 **Does Agmen send my code or conversations anywhere?**
 No. Agmen has no telemetry and makes no network requests. The agent CLIs talk to their own services, as they do outside Agmen.
 
-**Can a session read or direct sessions that aren't its children?**
-No. A session can message, read and annotate only the children directly under it, and report only to its parent. Only the primary can list and read every session, and it still directs only its own children.
+**Which conversations can a session read or message?**
+Each session can read its own handoff, direct its children and report to its parent. Children of the same top-level tab can exchange selected text with each other. Only the primary can list and read activity across the workspace.
 
 **Can agents start sessions without asking me?**
 They can start children when you or their parent ask for it, within the [limits](#the-session-tree). You see each one appear as a tab. A child runs with the permission mode you set for its agent, never one its parent chose.
@@ -324,7 +363,7 @@ Yes: tabs, the tree and the primary all work with one agent. Only the floating s
 Not yet. Each agent needs a profile: how to launch and resume it, how to give it tools, and how to tell when a turn is over. [Open a request](https://github.com/cxbxmxcx/agmen/issues/new/choose) if you know how a CLI does those.
 
 **How do I remove it?**
-Disconnect Kimi Code and Antigravity in **Connect agents…**, exit Agmen, then run the installer with `-Uninstall`. Delete `%APPDATA%\Agmen` to remove your saved tabs and settings too.
+Disconnect any agents pointing to this installation in **Connect agents…** and exit its workspaces. Choose **Uninstall Agmen** from Start or remove **Agmen** from **Settings → Apps → Installed apps**. Script installations also support `install.ps1 -Uninstall`. Saved workspaces, settings and conversations stay on disk.
 
 ## Troubleshooting
 
@@ -333,7 +372,7 @@ Disconnect Kimi Code and Antigravity in **Connect agents…**, exit Agmen, then 
 - **A child waits with a "trust folder?" badge.** The agent asks once whether to trust a folder it hasn't worked in. Open the tab and answer; the queued task goes in afterwards.
 - **A ✉ badge stays on a card.** A message is waiting, for example because you have text half-typed in that tab. Hover over the badge to see why. Send or clear your text with Ctrl+C, or right-click the card and choose **Type the queued message now** or **Discard queued messages**.
 - **Kimi Code or Antigravity won't start as the primary.** The primary works through Agmen's tools, so Agmen opens **Connect agents…** first. Connect that agent, and choose it again.
-- **A card says "No Agmen tools".** That Kimi Code or Antigravity session started while its agent wasn't connected to this copy of Agmen. Run **Connect agents…**, then restart that tab. Connect points the agent at one copy of Agmen; a second copy has to Connect again.
+- **A card says "No Agmen tools".** That Kimi Code or Antigravity session started while its agent wasn't connected to this installation of Agmen. Run **Connect agents…** in the installation you intend to use, then restart that tab. Its named workspaces share one connection. If the provider points to a different executable, choose **Connect here** in the desired installation.
 - **Antigravity reads files but won't edit them or run commands.** Agmen 0.1.0 started Antigravity with a read-only set of tools. Update Agmen, then restart the Antigravity tab.
 - **Shift+Enter sends the message when it should add a line.** The `x64\OpenConsole.exe` file next to `Agmen.exe` is missing. Reinstall, or extract the whole zip.
 - **A shortcut key does nothing.** Another app already uses it. Use the tray menu.
@@ -392,7 +431,7 @@ The primary is an ordinary session of the agent you chose, started in its own fo
 
 ## Roadmap
 
-Agmen is version 0.1, built for daily use by one person and now shared. What's planned next, with no dates promised:
+Agmen began as a tool for daily use by one person. Future plans include the following features.
 
 - **A settings screen**: your own color labels in place of the fixed four, theme, terminal colors, font and size, shortcut keys, notifications and the tree limits.
 - **The panel for every agent**: Codex, Kimi Code and Antigravity sessions in the floating panel, beside Claude Code's.

@@ -4,6 +4,8 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using Agmen.Agents;
+using Agmen.Hosting;
 using Agmen.Models;
 using Agmen.Services;
 
@@ -36,6 +38,10 @@ public partial class MainWindow : Window
     {
         _workspace = workspace;
         InitializeComponent();
+        Title = AppPaths.WorkspaceTitle + " — session monitor";
+        PanelTitle.Text = AppPaths.IsDefaultWorkspace ? "Agmen" : AppPaths.WorkspaceName;
+        PanelTitle.ToolTip = Title;
+        if (!AppPaths.OwnsGlobalHotkeys) WorkspaceButton.ToolTip = "Open this workspace";
         SessionList.ItemsSource = _sessions;
         LoadSettings();
         PinButton.Checked += (_, _) => SaveSettings();
@@ -67,7 +73,7 @@ public partial class MainWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        if (AppPaths.IsDev) return;   // the release copy owns the hotkey
+        if (!AppPaths.OwnsGlobalHotkeys) return;
         var source = (HwndSource)PresentationSource.FromVisual(this)!;
         source.AddHook(WndProc);
         if (!RegisterHotKey(source.Handle, HotkeyId, MOD_CONTROL | MOD_ALT, VK_C))
@@ -124,13 +130,18 @@ public partial class MainWindow : Window
         _refreshing = true;
         try
         {
-            bool scanTranscripts = !_recentOffered && _pendingRestore.Count == 0;
+            bool scanTranscripts = AppPaths.IsDefaultWorkspace && !_recentOffered && _pendingRestore.Count == 0;
+            var observedAt = DateTime.Now;
             var agentTabs = _workspace.AgentTabRefs();
+            var local = _workspace.Tabs.Where(t => t.Agent == AgentKind.Claude).Select(t => t.CurrentPid).Where(pid => pid > 0).ToHashSet();
+            var scope = WorkspaceSessions.Current;
+            bool IncludeProcess(int pid) => local.Contains(pid) || (AppPaths.IsDefaultWorkspace &&
+                !ProcessTree.Ancestry(pid).Any(p => p.Name.Equals("Agmen", StringComparison.OrdinalIgnoreCase) && p.Pid != Environment.ProcessId));
             var (snapshot, unregistered, recent, agentInfos) = await Task.Run(() => (
-                _monitor.Snapshot(),
-                _monitor.UnregisteredLiveCount(),
-                scanTranscripts ? RestoreService.RecentFromTranscripts(TimeSpan.FromHours(3)) : null,
-                _workspace.Agents.Poll(agentTabs)));
+                _monitor.Snapshot(s => local.Contains(s.Pid) || IncludeProcess(s.Pid) && scope.Visible(AgentKind.Claude, s.SessionId)),
+                _monitor.UnregisteredLiveCount(IncludeProcess),
+                scanTranscripts ? WorkspaceWindow.RecentWorkspaceSessions(TimeSpan.FromHours(3)) : null,
+                _workspace.Agents.Poll(agentTabs, observedAt)));
             _lastSnapshot = snapshot;
             _unregisteredLive = unregistered;
             // The workspace first, so the hosted flags below reflect this poll.
@@ -172,7 +183,7 @@ public partial class MainWindow : Window
                 _recentOffered = true;
                 if (recent is not null && _unregisteredLive == 0)
                 {
-                    var live = snapshot.Select(s => s.SessionId).ToHashSet();
+                    var live = SessionMonitor.LiveSessionIds();
                     foreach (var r in recent)
                         if (!live.Contains(r.Entry.SessionId) && !_workspace.HasSession(r.Entry.SessionId)
                             && _pendingRestore.All(p => p.SessionId != r.Entry.SessionId))
@@ -321,7 +332,7 @@ public partial class MainWindow : Window
     {
         string span = window.TotalHours >= 2 ? $"{window.TotalHours:0} hours" : "hour";
         var live = _lastSnapshot.Select(s => s.SessionId).ToHashSet();
-        var candidates = RestoreService.RecentFromTranscripts(window)
+        var candidates = WorkspaceWindow.RecentWorkspaceSessions(window)
             .Where(r => !live.Contains(r.Entry.SessionId))
             .Select(r => r.Entry)
             .ToList();

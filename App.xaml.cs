@@ -31,8 +31,7 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
-        // Single instance per flavor (release or dev): a second launch just tells the first one to show
-        // the panel, or the workspace when started with --workspace.
+        // A second launch for the same workspace focuses its current window.
         bool wantsWorkspace = e.Args.Contains("--workspace", StringComparer.OrdinalIgnoreCase);
         _instanceMutex = new Mutex(true, AppPaths.InstanceName + "_Instance", out bool isFirst);
         _showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, AppPaths.InstanceName + "_Show");
@@ -66,7 +65,7 @@ public partial class App : Application
         var (removed, kept) = LoginEnvironment.Apply();
         Log.Write($"start {AppPaths.InstanceName} {typeof(App).Assembly.GetName().Version} (environment: dropped {removed} inherited, {kept} from login)");
 
-        _label = AppPaths.IsDev ? "Agmen DEV" : "Agmen";
+        _label = AppPaths.WorkspaceTitle;
         _workspace = new WorkspaceWindow();
         _window = new MainWindow(_workspace);
 
@@ -85,7 +84,7 @@ public partial class App : Application
         _tray = new WinForms.NotifyIcon
         {
             Icon = _iconNone,
-            Text = $"{_label} — Claude Code sessions",
+            Text = TrayText($"{_label} — Claude Code sessions"),
             Visible = true,
         };
         _window.SessionsRefreshed += (total, busy) =>
@@ -94,7 +93,7 @@ public partial class App : Application
             var text = total == 0
                 ? $"{_label} — no Claude Code sessions"
                 : $"{_label} — {total} session{(total == 1 ? "" : "s")}, {busy} busy";
-            _tray.Text = text.Length > 63 ? text[..63] : text;   // NotifyIcon rejects longer tooltips
+            _tray.Text = TrayText(text);
         };
         _tray.MouseUp += (_, a) =>
         {
@@ -115,7 +114,23 @@ public partial class App : Application
         };
 
         var menu = new WinForms.ContextMenuStrip();
-        menu.Items.Add("Open workspace" + (AppPaths.IsDev ? "" : "  (Ctrl+Alt+W)"), null, (_, _) => _workspace.ShowWorkspace());
+        menu.Items.Add("Open workspace" + (AppPaths.OwnsGlobalHotkeys ? "  (Ctrl+Alt+W)" : ""), null, (_, _) => _workspace.ShowWorkspace());
+        var workspaces = new WinForms.ToolStripMenuItem("Workspaces");
+        workspaces.DropDownItems.Add("New workspace…", null, (_, _) => _workspace.NewNamedWorkspace());
+        workspaces.DropDownItems.Add(new WinForms.ToolStripSeparator());
+        workspaces.DropDownOpening += (_, _) =>
+        {
+            for (int i = workspaces.DropDownItems.Count - 1; i >= 2; i--)
+            {
+                var previous = workspaces.DropDownItems[i];
+                workspaces.DropDownItems.RemoveAt(i);
+                previous.Dispose();
+            }
+            foreach (var name in _workspace.WorkspaceNames())
+                workspaces.DropDownItems.Add(new WinForms.ToolStripMenuItem(name.Replace("&", "&&"), null,
+                    (_, _) => _workspace.OpenNamedWorkspace(name)) { Checked = name == AppPaths.WorkspaceName });
+        };
+        menu.Items.Add(workspaces);
         var newSession = new WinForms.ToolStripMenuItem("New session");
         foreach (var agent in AgentProfiles.All)
         {
@@ -134,7 +149,7 @@ public partial class App : Application
         menu.Items.Add("Agent settings…", null, (_, _) => _workspace.ShowAgentSettings());
         menu.Items.Add("Connect agents…", null, (_, _) => _workspace.ShowConnect());
         menu.Items.Add(new WinForms.ToolStripSeparator());
-        menu.Items.Add("Show / Hide panel" + (AppPaths.IsDev ? "" : "  (Ctrl+Alt+C)"), null, (_, _) => _window.Toggle());
+        menu.Items.Add("Show / Hide panel" + (AppPaths.OwnsGlobalHotkeys ? "  (Ctrl+Alt+C)" : ""), null, (_, _) => _window.Toggle());
         menu.Items.Add("Remember current sessions", null, (_, _) => _window.SaveSessionSet());
         menu.Items.Add("Relaunch saved sessions", null, (_, _) => _window.LaunchSessionSet());
         var recent = new WinForms.ToolStripMenuItem("Restore recently active Claude Code sessions");
@@ -160,9 +175,11 @@ public partial class App : Application
         int restored = _workspace.RestoreSavedTabs();
         bool opened = OpenFromArgs(e.Args);
         // The first time Agmen runs there is nothing to restore, so show where sessions start.
-        if (restored > 0 || opened || wantsWorkspace || WorkspaceStore.FirstRun) _workspace.ShowWorkspace();
-        _window.ShowPanel();
+        if (!AppPaths.IsDefaultWorkspace || restored > 0 || opened || wantsWorkspace || WorkspaceStore.FirstRun) _workspace.ShowWorkspace();
+        if (AppPaths.IsDefaultWorkspace && !wantsWorkspace) _window.ShowPanel();
     }
+
+    private static string TrayText(string text) => text.Length <= 63 ? text : text[..62] + "…";
 
     /// <summary>
     /// Command line: <c>--open &lt;folder&gt;</c> starts a new session there, and

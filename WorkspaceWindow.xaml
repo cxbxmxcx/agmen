@@ -84,8 +84,9 @@
                         Margin="6,0,0,0" Width="36" Click="OnRecentClick"
                         ToolTip="Reopen earlier sessions: the session history (Ctrl+Shift+H), recent Claude Code sessions, or your saved set"/>
             </Grid>
-            <TextBlock DockPanel.Dock="Top" Text="SESSIONS" Margin="20,2,0,6" FontSize="10" FontWeight="SemiBold"
-                       Foreground="{StaticResource TextSecondary}"/>
+            <Button DockPanel.Dock="Top" Content="Workspaces  &#x25BE;" HorizontalAlignment="Left" Margin="10,0,10,6"
+                    Style="{StaticResource ToolButton}" Click="OnWorkspacesClick"
+                    ToolTip="Create a workspace or open a saved workspace in its own window"/>
             <TextBlock x:Name="SidebarFooter" DockPanel.Dock="Bottom" Margin="12,6,12,10" FontSize="11"
                        Foreground="{StaticResource TextSecondary}" TextWrapping="Wrap"/>
             <!-- No type-to-select: with the list focused, typed letters would jump between cards. -->
