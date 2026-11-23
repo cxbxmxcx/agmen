@@ -834,13 +834,15 @@ public sealed class HostedTab : INotifyPropertyChanged
             var text = PlainMessage(message.Text);
             var term = ctl.ConPTYTerm;
             var inputVersion = _userInputVersion;
+            var delivered = _deliveredAt;
             term.WriteToTerm(_bracketedPaste ? "\x1b[200~" + text.Replace('\n', '\r') + "\x1b[201~" : text.Replace('\n', ' '));
-            await Task.Delay(500);
+            await Task.Delay(EnterDelay(Agent, text.Length));
             if (Terminal != ctl || State != TabState.Running) return;
             if (inputVersion == _userInputVersion && AtRest(_lastStatus) && message.CanDeliver?.Invoke() != false)
             {
                 term.WriteToTerm("\r");
                 HasConversationInput = true;
+                if (Agent == AgentKind.Codex) await PressEnterAgainIfTakenAsNewLine(ctl, inputVersion, delivered);
             }
             else
             {
@@ -854,6 +856,35 @@ public sealed class HostedTab : INotifyPropertyChanged
     }
 
     private long _userInputVersion;
+
+    /// <summary>
+    /// How long after the paste to press Enter. Codex on Windows reads a paste as a burst of
+    /// keys, and an Enter that arrives while it is still reading them becomes a new line in the
+    /// message instead of sending it. It reads about a character a millisecond on a busy machine,
+    /// so a long message waits longer.
+    /// </summary>
+    internal static TimeSpan EnterDelay(AgentKind agent, int length) => TimeSpan.FromMilliseconds(
+        agent == AgentKind.Codex ? Math.Clamp(500 + 2 * length, 500, 8000) : 500);
+
+    /// <summary>
+    /// Codex can still take Enter as a new line when it reads the paste more slowly than that.
+    /// Its turn then never starts, and the message waits in its prompt until the next one is
+    /// typed after it. So while no turn has started since, the session is at rest and nobody has
+    /// typed in the tab, press Enter again, twice at most. Enter on an empty prompt does nothing
+    /// in Codex, so a turn that started and ended between two polls comes to no harm.
+    /// </summary>
+    private async Task PressEnterAgainIfTakenAsNewLine(EasyTerminalControl ctl, long inputVersion, DateTime? delivered)
+    {
+        if (delivered is null) return;
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(4));
+            if (Terminal != ctl || State != TabState.Running || _deliveredAt != delivered
+                || inputVersion != _userInputVersion || !AtRest(_lastStatus)) return;
+            Log.Write($"tab {ShortId}: Codex took Enter as a new line, so Agmen pressed it again");
+            ctl.ConPTYTerm.WriteToTerm("\r");
+        }
+    }
 
     internal static string PlainMessage(string text) => new string(text.ReplaceLineEndings("\n").Replace("\t", "    ")
         .Where(c => c == '\n' || !char.IsControl(c)).ToArray()).Trim();

@@ -196,6 +196,14 @@ Checked on 2026-11-21 with Antigravity 1.5.13, which had updated itself from 1.5
 - **`inheritCustomizations` exists now.** It decides whether an agent adopts the user's skills, rules, plugins, subagents and MCP servers. `inheritMcp` still brings the MCP servers on its own, so the agent keeps it.
 - **A session without tools looked like any other.** A Kimi Code or Antigravity session that starts while its agent points at another copy of Agmen has none of this copy's tools. Agmen offered Connect once per run and not at all for restored tabs. The card now says "No Agmen tools".
 
+## Typed messages and Codex 0.171
+
+Found on 2026-11-23 in two days of use of a 0.2 test build, with Claude Code 2.1.330 as the primary and Codex 0.171, Kimi Code 2.7.2 and Antigravity 1.5.14 and 1.5.15 as its children.
+
+- **Codex took Enter as a new line.** Codex on Windows reads a paste as a burst of keys and turns an Enter that comes while it is still reading them into a new line. Agmen pressed Enter 500 ms after the paste, so a message of more than a few hundred characters stayed in Codex's prompt until another was typed after it. In the log, 52 of 94 messages to Codex started no turn, against 5 of 264 to Claude Code and 2 of 75 to Antigravity. One Codex prompt held eight sibling messages, 10,498 characters, with a new line where each Enter had gone. Codex reads about a character a millisecond on a busy machine.
+- **The fix, checked against a real Codex session.** Agmen now waits 500 ms plus 2 ms a character, up to 8 seconds, before Enter in a Codex tab, and presses Enter again, twice at most, while no turn has started, the tab is at rest and nobody has typed there. Enter on an empty Codex prompt does nothing. Messages of 1,614, 3,234, 534 and 12,054 characters each started their own turn; the longest needed the second Enter. Before the fix the same four started one turn between them.
+- **Claude Code's trust menu opens on "No, exit".** In 2.1.331 the folder trust question lists "No, exit" above "Yes, I trust this folder" and starts on it. Agmen still recognizes the question.
+
 ## Sources
 
 - Kimi Code: [MCP](https://moonshotai.github.io/kimi-code/en/customization/mcp), [hooks](https://moonshotai.github.io/kimi-code/en/customization/hooks)
