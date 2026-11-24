@@ -53,7 +53,15 @@ public sealed class AgentMonitor
         public bool HooksSeen;
         /// <summary>Antigravity: its log says it can't build the agent the session runs as.</summary>
         public bool AgentRefused;
+        /// <summary>Antigravity: its conversation stopped to wait on a subagent and carries on by itself.</summary>
+        public bool PendingWork;
     }
+
+    /// <summary>
+    /// How long an Antigravity conversation that stopped to wait on its own work stays busy with no
+    /// hook from it or its subagents, before Agmen takes it as idle after all.
+    /// </summary>
+    private static readonly TimeSpan PendingWorkTimeout = TimeSpan.FromMinutes(10);
 
     /// <summary>On a first read of a long session, only its last few megabytes matter for status.</summary>
     private const long TailBytes = 4 * 1024 * 1024;
@@ -125,9 +133,17 @@ public sealed class AgentMonitor
                     break;
                 case (AgentKind.Antigravity, _):
                     t.HooksSeen = true;
+                    // agy runs each subagent in a conversation of its own, in the same process, and
+                    // their hooks come here too. Only the tab's own conversation says what the tab is
+                    // doing. Another one that reports while it is at work is its subagent; one that
+                    // reports while it is idle is a conversation the user switched to.
                     if (Str(payload, "conversationId") is { Length: > 0 } conversation)
                     {
-                        if (t.SessionId != conversation) t.Transcript = null;
+                        if (t.SessionId is { } own && conversation != own)
+                        {
+                            if (t.Status is "busy" or "waiting") break;
+                            t.Transcript = null;
+                        }
                         t.SessionId = conversation;
                         t.Confirmed = true;
                     }
@@ -135,11 +151,24 @@ public sealed class AgentMonitor
                         && Str(payload, "transcriptPath") is { Length: > 0 } path && Path.IsPathFullyQualified(path)
                         && string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase)) t.Transcript = expected;
                     t.Model = Str(payload, "modelName") ?? t.Model;
-                    if (evt == "PreInvocation") t.Status = "busy";
+                    if (evt == "PreInvocation")
+                    {
+                        t.Status = "busy";
+                        t.PendingWork = false;
+                    }
                     else if (evt == "Stop")
                     {
-                        t.Status = "idle";
-                        t.TurnsCompleted++;
+                        // Stop also fires while the conversation waits on a subagent. It isn't fully
+                        // idle then, and goes on by itself when the subagent is done, so a message
+                        // typed in now would wait in agy's queue until all of that is over.
+                        if (payload?["fullyIdle"] is JsonValue idle && idle.TryGetValue<bool>(out var fully) && !fully)
+                            t.PendingWork = true;
+                        else
+                        {
+                            t.Status = "idle";
+                            t.PendingWork = false;
+                            t.TurnsCompleted++;
+                        }
                     }
                     else if (evt == "SessionStart" && t.Status.Length == 0) t.Status = "idle";
                     break;
@@ -377,6 +406,14 @@ public sealed class AgentMonitor
     /// </summary>
     private void PollAntigravity(AgentTabRef tab, Track t)
     {
+        // A conversation that stopped to wait on its subagents goes on by itself, and their hooks
+        // or its own keep coming meanwhile. A long silence means nothing is coming after all.
+        if (t.PendingWork && t.LastActivity is { } last && DateTimeOffset.Now - last > PendingWorkTimeout)
+        {
+            t.PendingWork = false;
+            t.Status = "idle";
+            t.TurnsCompleted++;
+        }
         if (t.File is null)
         {
             if (DateTime.UtcNow - t.LastSearch < TimeSpan.FromSeconds(3)) return;
@@ -433,7 +470,11 @@ public sealed class AgentMonitor
         if (line.Contains("Surfacing tool confirmation", StringComparison.Ordinal)
             || line.Contains("Surfacing ask_question", StringComparison.Ordinal)) t.Status = "waiting";
         else if (line.Contains("Responding to tool confirmation", StringComparison.Ordinal)) t.Status = "busy";
-        else if (line.Contains("Cancelling in-progress response", StringComparison.Ordinal)) t.Status = "idle";
+        else if (line.Contains("Cancelling in-progress response", StringComparison.Ordinal))
+        {
+            t.Status = "idle";
+            t.PendingWork = false;
+        }
         else return;
         t.LastActivity = DateTimeOffset.Now;
     }

@@ -40,6 +40,7 @@ internal static class Program
             WorkspaceChecks.Run();
             SharingChecks.Run();
             IdentityChecks.Run();
+            AntigravityHookChecks.Run();
             WorkspaceRoutingChecks.Run();
             CodexIdentityChecks.Run();
             if (args.Contains("--native"))
